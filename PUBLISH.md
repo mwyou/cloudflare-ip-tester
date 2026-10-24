@@ -4,22 +4,22 @@
 
 ## 连接账号
 
-先确认 GitHub 仓库地址、可见性和 Docker Hub 镜像仓库，例如 `OWNER/cloudflare-ip-tester` 与 `NAMESPACE/cloudflare-ip-tester`。下面的 `OWNER`、`NAMESPACE` 和 `USERNAME` 都需要替换为真实值。
+本项目的公开源码仓库为 [mwyou/cloudflare-ip-tester](https://github.com/mwyou/cloudflare-ip-tester)，发布目标为 Docker Hub 镜像 `cotelforce/cloudflare-ip-tester`。
 
-在 GitHub 仓库 Settings → Secrets and variables → Actions 中设置：
+在 [GitHub Actions Secrets / Variables](https://github.com/mwyou/cloudflare-ip-tester/settings/secrets/actions) 中设置：
 
 | 类型 | 名称 | 内容 |
 |---|---|---|
-| Variable | `DOCKERHUB_USERNAME` | Docker Hub 登录用户名 |
-| Variable | `DOCKERHUB_IMAGE` | 完整镜像名，例如 `NAMESPACE/cloudflare-ip-tester`，不含版本标签 |
+| Variable | `DOCKERHUB_USERNAME` | `cotelforce` |
+| Variable | `DOCKERHUB_IMAGE` | `cotelforce/cloudflare-ip-tester`，不含版本标签 |
 | Secret | `DOCKERHUB_TOKEN` | 对目标镜像有推送权限的 Docker Hub Access Token |
 
 不要把 Token 放在源码、工作流、Issues 或聊天中。可以直接在 GitHub 的 Secret 页面填写，或在你本机的交互终端中执行以下命令，由 GitHub CLI 提示输入 Token：
 
 ```sh
-gh variable set DOCKERHUB_USERNAME --repo OWNER/cloudflare-ip-tester --body USERNAME
-gh variable set DOCKERHUB_IMAGE --repo OWNER/cloudflare-ip-tester --body NAMESPACE/cloudflare-ip-tester
-gh secret set DOCKERHUB_TOKEN --repo OWNER/cloudflare-ip-tester
+gh variable set DOCKERHUB_USERNAME --repo mwyou/cloudflare-ip-tester --body cotelforce
+gh variable set DOCKERHUB_IMAGE --repo mwyou/cloudflare-ip-tester --body cotelforce/cloudflare-ip-tester
+gh secret set DOCKERHUB_TOKEN --repo mwyou/cloudflare-ip-tester
 ```
 
 Docker Hub 镜像仓库需要提前创建，并确认该 Token 有权向其推送。这个 Token 用于镜像发布，与部署时填写的 Cloudflare API Token 是两份不同凭据。
@@ -27,7 +27,7 @@ Docker Hub 镜像仓库需要提前创建，并确认该 Token 有权向其推�
 ## 自动测试和发布
 
 - 推送 `main` 或提交 Pull Request：运行 Python 回归测试、官方 CFST 契约测试、JavaScript 语法检查与 Compose 校验，再构建并运行 Linux amd64 / arm64 容器，检查非 root 用户、CFST 和跨容器数据卷持久化。不推送 Docker Hub。
-- 推送 `v3.1.0` 这种正式版本标签：先通过上述检查，再构建并发布 `NAMESPACE/cloudflare-ip-tester:3.1.0` 与 `:latest` 两个标签。
+- 推送 `v3.1.0` 这种正式版本标签：先通过上述检查，再构建并发布 `cotelforce/cloudflare-ip-tester:3.1.0` 与 `:latest` 两个标签。
 - 手动发布：进入 GitHub Actions → Publish Docker Hub image → Run workflow，填写 `v3.1.0` 这种版本号。只接受 `v主版本.次版本.修订版本` 格式。
 
 首次发布示例：
@@ -46,7 +46,7 @@ git push origin v3.1.0
 ```dotenv
 CF_DOMAIN=你的优选域名
 CF_API_TOKEN=你的CloudflareToken
-CFIP_IMAGE=NAMESPACE/cloudflare-ip-tester:3.1.0
+CFIP_IMAGE=cotelforce/cloudflare-ip-tester:3.1.0
 ```
 
 然后运行：
