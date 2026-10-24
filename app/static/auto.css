@@ -36,6 +36,11 @@ header h1{margin:0;font-size:19px;font-weight:600}
 .hint{font-size:12px;color:var(--muted);margin:16px 0 0}
 .muted{color:var(--muted)}
 .table-wrap{overflow:visible}
+tbody.collapsed tr:nth-child(n+4){display:none}
+.result-toggle{margin:10px 0 4px;padding:7px 12px;color:var(--text);background:transparent;border:1px solid #496574;border-radius:7px;font-size:12px;cursor:pointer}
+.result-toggle:hover{background:#203849;border-color:var(--mint)}
+.result-toggle:focus-visible{outline:2px solid var(--mint);outline-offset:3px}
+.result-toggle[hidden]{display:none}
 table{width:100%;border-collapse:collapse;text-align:left;table-layout:fixed;overflow-wrap:anywhere}
 th{font-size:12px;color:var(--muted);font-weight:400;padding:8px 12px;border-bottom:1px solid var(--line)}
 td{padding:13px 12px;border-bottom:1px solid #263446;font-size:13px}

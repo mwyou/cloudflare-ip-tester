@@ -10,14 +10,17 @@ let cfstData;
 let cfstMessage = '';
 let cfstOptions = '';
 let intervalMessage = '';
+const resultExpanded = {selection: false, ranked: false};
 function dnsItems(ips) {
   return ips?.length ? ips.map(ip => `<div class="dns-item">${esc(ip)}</div>`).join('') : '<p class="muted">暂无记录</p>';
 }
 function disableActions() { document.querySelectorAll('[data-action],.cfst-controls button,.cfst-controls select,.interval-controls button,.interval-controls input').forEach(button => { button.disabled = true; }); }
-function renderResultRows(selector, rows, ranked) {
+function renderResultRows(selector, rows, ranked, toggleSelector, expanded) {
   const body = $(selector);
   if (!rows?.length) {
     body.innerHTML = `<tr><td colspan="${ranked ? 5 : 4}" class="empty">暂无结果</td></tr>`;
+    const toggle = toggleSelector && $(toggleSelector);
+    if (toggle) toggle.hidden = true;
     return;
   }
   body.innerHTML = rows.map(row => {
@@ -25,6 +28,13 @@ function renderResultRows(selector, rows, ranked) {
     const source = ranked ? `<td>${esc(row.source || '—')}</td>` : '';
     return `<tr class="${row.selected?'selected':''}">${source}<td>${esc(row.ip)}<small>${esc(row.colo || '—')}</small></td><td>${row.measured === false ? '—' : Number(row.latency_ms).toFixed(2)+' ms'}</td><td>${row.measured === false ? '—' : Number(row.bandwidth_mbps).toFixed(2)+' Mbps'}</td><td class="${good?'good':'bad'}">${row.selected?'入选':good?'达标':row.measured===false?'无有效样本':row.speed_mibps>0?'未达标':'无下载样本'}</td></tr>`;
   }).join('');
+  body.classList.toggle('collapsed', !expanded && rows.length > 3);
+  const toggle = toggleSelector && $(toggleSelector);
+  if (toggle) {
+    toggle.hidden = rows.length <= 3;
+    toggle.textContent = expanded ? '收起' : '展开全部';
+    toggle.setAttribute('aria-expanded', String(expanded));
+  }
 }
 let currentStatus = {max_latency_ms:100,min_bandwidth_mbps:30};
 function renderCFST(data) {
@@ -96,8 +106,8 @@ async function refresh() {
     // must not make those new results disappear from the completed run.
     const oldIPs = new Set(data.selection_existing_ips ?? (data.check_results || []).map(row => row.ip));
     const newRows = (data.selection_results || []).filter(row => !oldIPs.has(row.ip));
-    renderResultRows('#selection-rows', newRows, false);
-    renderResultRows('#ranked-rows', data.ranked_results, true);
+    renderResultRows('#selection-rows', newRows, false, '#selection-toggle', resultExpanded.selection);
+    renderResultRows('#ranked-rows', data.ranked_results, true, '#ranked-toggle', resultExpanded.ranked);
     $('#check-time').textContent = data.check_time ? date(data.check_time) : '';
     $('#selection-count').textContent = data.selection_time ? `候选 ${data.selection_candidate_count ?? 0} 个 · 新 IP ${newRows.length} 条` : '';
     $('#selection-time').textContent = data.selection_time ? date(data.selection_time) : '';
@@ -175,3 +185,16 @@ $('#interval-save').addEventListener('click', async () => {
   }
 });
 refresh();
+
+document.querySelector('#selection-toggle').addEventListener('click', event => {
+  resultExpanded.selection = !resultExpanded.selection;
+  event.currentTarget.textContent = resultExpanded.selection ? '收起' : '展开全部';
+  event.currentTarget.setAttribute('aria-expanded', String(resultExpanded.selection));
+  $('#selection-rows').classList.toggle('collapsed', !resultExpanded.selection);
+});
+document.querySelector('#ranked-toggle').addEventListener('click', event => {
+  resultExpanded.ranked = !resultExpanded.ranked;
+  event.currentTarget.textContent = resultExpanded.ranked ? '收起' : '展开全部';
+  event.currentTarget.setAttribute('aria-expanded', String(resultExpanded.ranked));
+  $('#ranked-rows').classList.toggle('collapsed', !resultExpanded.ranked);
+});
