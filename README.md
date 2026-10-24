@@ -52,7 +52,7 @@ docker compose logs --tail=100
 docker compose down
 ```
 
-`cfst-data` 保存状态，`cfst-bin` 保存 CFST 二进制。更新容器保留这两个命名卷；迁移时保持部署目录或 Compose 项目名，并保留原有卷。`docker compose down -v` 会删除两者。
+容器名固定为 `cfst-dns`。`cfst-data` 保存状态，`cfst-bin` 保存 CFST 二进制。更新容器保留这两个命名卷；`docker compose down -v` 会删除两者。
 
 ## CFST 版本管理
 

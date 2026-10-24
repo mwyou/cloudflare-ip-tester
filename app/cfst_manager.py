@@ -383,6 +383,13 @@ if __name__ == "__main__":
     except Exception as error:
         # OS errors and external responses may carry local paths or unexpected text.
         from automation import ServiceError
-        print(str(error) if isinstance(error, (InstallError, ServiceError)) else
-              "CFST 管理失败；请检查文件权限、网络和版本数据卷，并用 status 核对当前版本", file=sys.stderr)
+        if isinstance(error, (InstallError, ServiceError)):
+            message = str(error)
+        else:
+            detail = str(error).strip().replace("\n", " ")
+            if len(detail) > 240:
+                detail = detail[:237] + "..."
+            message = f"{type(error).__name__}: {detail}" if detail else type(error).__name__
+        print(f"CFST 管理失败：{message}；请检查文件权限、网络和版本数据卷，并用 status 核对当前版本",
+              file=sys.stderr)
         raise SystemExit(1)
