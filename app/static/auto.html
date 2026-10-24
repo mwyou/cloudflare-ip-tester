@@ -18,5 +18,8 @@
 </section>
 <div class="main-grid"><section class="panel"><div class="panel-title"><h2>DNS 记录</h2><span class="pill">灰云</span></div><div id="dns" class="dns-list"><p class="muted">暂无记录</p></div><p class="hint" id="updated">尚未更新</p></section>
 <section class="panel"><div class="panel-title"><h2>测速结果</h2></div><p class="proposal" id="proposal" hidden></p><div class="table-wrap"><table><thead><tr><th>IP / 地区</th><th>TCP 延迟</th><th>下载带宽 ↓</th><th>状态</th></tr></thead><tbody id="rows"><tr><td colspan="4" class="empty">暂无测速结果</td></tr></tbody></table></div></section></div>
+<section class="panel cfst-panel" aria-label="CFST 版本管理"><div class="panel-title"><h2>CFST</h2><span id="cfst-current" class="pill">读取中</span></div>
+<div class="cfst-controls"><label for="cfst-version">版本</label><select id="cfst-version" disabled><option>读取中</option></select><button type="button" id="cfst-refresh" disabled>检查更新</button><button type="button" id="cfst-apply" disabled>切换版本</button><button type="button" id="cfst-rollback" disabled>回滚</button></div>
+<p class="hint" id="cfst-status" role="status">—</p></section>
 <details class="panel history"><summary>运行记录</summary><ol id="events"><li class="muted">暂无记录</li></ol></details>
 </div></body></html>

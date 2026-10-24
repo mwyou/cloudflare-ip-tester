@@ -48,7 +48,6 @@ jobs:
       - name: Compose configuration
         run: |
           docker compose config --quiet
-          docker compose --profile tools config --quiet
 
   containers:
     runs-on: ubuntu-24.04

@@ -18,10 +18,11 @@ header h1{margin:0;font-size:19px;font-weight:600}
 .featured strong{color:var(--mint)}
 .steps{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:14px;margin-bottom:20px}
 .steps>div{min-width:0}
-.steps button{width:100%;padding:11px 8px;color:var(--text);background:var(--panel);border:1px solid #496574;border-radius:7px;font:inherit;cursor:pointer}
-.steps button:hover:enabled{background:#203849;border-color:var(--mint)}
-.steps button:focus-visible{outline:2px solid var(--mint);outline-offset:3px}
-.steps button:disabled{cursor:default;opacity:.45}
+.steps button,.cfst-controls button{padding:11px 14px;color:var(--text);background:var(--panel);border:1px solid #496574;border-radius:7px;font:inherit;cursor:pointer}
+.steps button{width:100%;padding:11px 8px}
+.steps button:hover:enabled,.cfst-controls button:hover:enabled{background:#203849;border-color:var(--mint)}
+.steps button:focus-visible,.cfst-controls button:focus-visible,.cfst-controls select:focus-visible{outline:2px solid var(--mint);outline-offset:3px}
+.steps button:disabled,.cfst-controls button:disabled,.cfst-controls select:disabled{cursor:default;opacity:.45}
 .steps button.running{opacity:1;border-color:var(--mint);color:var(--mint)}
 .steps small{display:block;font-size:11px;line-height:1.5;color:var(--muted);padding:7px 2px 0;overflow-wrap:anywhere}
 .proposal{font-size:12px;line-height:1.8;color:var(--mint);overflow-wrap:anywhere;margin:0 0 12px}
@@ -42,6 +43,10 @@ td:first-child{font-family:Consolas,monospace}
 td small{display:block;color:var(--muted);font:11px "Segoe UI",sans-serif}
 .good{color:var(--mint)}
 .bad{color:var(--orange)}
+.cfst-panel{margin-top:20px}
+.cfst-controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.cfst-controls label{font-size:12px;color:var(--muted)}
+.cfst-controls select{min-width:180px;flex:1;padding:12px;color:var(--text);background:var(--bg);border:1px solid #496574;border-radius:7px;font:inherit}
 .empty{text-align:center;color:var(--muted);padding:32px 0}
 .history{margin-top:20px;padding:0 20px}
 .history summary{padding:16px 0;font-size:14px;cursor:pointer}

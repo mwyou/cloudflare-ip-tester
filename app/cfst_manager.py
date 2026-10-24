@@ -89,6 +89,58 @@ def download_release(version, arch, checksum):
     return binary, {"version": version, "arch": arch, "archive_sha256": checksum.lower(), "binary_sha256": digest(binary)}
 
 
+class ReleaseCatalog:
+    """Read checksums from official GitHub release assets; never accept a download URL from clients."""
+    def __init__(self, arch):
+        self.arch, self.lock = arch, threading.Lock()
+        self.fetch_lock = threading.Lock()
+        self.entries, self.checked_at, self.expires = [], None, 0
+
+    def refresh(self):
+        with self.fetch_lock:
+            with self.lock:
+                if self.expires > time.monotonic():
+                    return
+            try:
+                releases = json.loads(read_url(
+                    "https://api.github.com/repos/XIU2/CloudflareSpeedTest/releases?per_page=20", 4_000_000))
+                if not isinstance(releases, list):
+                    raise ValueError()
+                entries = []
+                for release in releases:
+                    version = release.get("tag_name", "")
+                    if release.get("draft") or release.get("prerelease") or not re.fullmatch(TAG, version):
+                        continue
+                    asset = next((a for a in release.get("assets", [])
+                                  if a.get("name") == f"cfst_linux_{self.arch}.tar.gz"), None)
+                    if asset is None:
+                        continue
+                    checksum = asset.get("digest") or ("sha256:" + HASHES[self.arch] if version == VERSION else "")
+                    if not re.fullmatch(r"sha256:[a-fA-F0-9]{64}", checksum):
+                        continue
+                    entries.append({"version": version, "checksum": checksum[7:].lower()})
+                if not entries:
+                    raise ValueError()
+            except Exception:
+                raise InstallError("无法获取官方版本，请检查 GitHub 连接或稍后再试") from None
+            with self.lock:
+                self.entries, self.checked_at = entries, time.time()
+                self.expires = time.monotonic() + 600
+
+    def resolve(self, version):
+        self.refresh()
+        with self.lock:
+            entry = next((item for item in self.entries if item["version"] == version), None)
+            if entry is None:
+                raise InstallError("官方列表中没有可校验的所选版本，请重新检查更新")
+            return entry["checksum"]
+
+    def snapshot(self):
+        with self.lock:
+            return {"releases": [{"version": item["version"]} for item in self.entries],
+                    "checked_at": self.checked_at}
+
+
 def atomic_json(path, data):
     handle, temporary = tempfile.mkstemp(prefix=".state-", dir=path.parent)
     try:
@@ -248,6 +300,28 @@ class Store:
         binary, metadata = self.release(current["previous"])
         smoke(binary, metadata["version"])
         atomic_json(self.state_file, {"active": current["previous"], "previous": current["active"]})
+
+    def select(self, release_id, smoke=smoke_test):
+        binary, metadata = self.release(release_id)
+        smoke(binary, metadata["version"])
+        self.activate(release_id)
+
+    def inventory(self):
+        state = self.state()
+        installed = []
+        for folder in sorted((self.home/"releases").glob("*")):
+            if not re.fullmatch(RELEASE_ID, folder.name):
+                continue
+            try:
+                metadata = json.loads((folder/"manifest.json").read_text(encoding="utf-8"))
+                validate_release(metadata["version"], metadata["arch"], metadata["archive_sha256"])
+                if metadata["arch"] != self.arch or self.release_id(metadata) != folder.name:
+                    continue
+                installed.append({"id": folder.name, "version": metadata["version"],
+                                  "current": folder.name == state["active"]})
+            except (OSError, ValueError, KeyError, TypeError, InstallError):
+                continue
+        return {"installed": installed, "current": state["active"], "previous": state["previous"], "arch": self.arch}
 
     def describe(self):
         data = {}

@@ -15,7 +15,7 @@ environment:
   CF_API_TOKEN: "你的CloudflareToken"
 ```
 
-Token 需要目标 Zone 的 DNS Read、DNS Edit；自动查找 Zone 时还需 Zone Read。也可以在 `CF_ZONE_ID` 填入 Zone ID。
+Token 需要目标 Zone 的 DNS Read、DNS Edit；自动查找 Zone 时还需 Zone Read。有 Zone ID 时，可以在 Compose 的 `environment` 中添加 `CF_ZONE_ID: "你的ZoneID"`。
 
 启动：
 
@@ -26,7 +26,7 @@ docker compose up -d
 
 在部署机器上访问 <http://127.0.0.1:8789>。远程服务器可先执行 `ssh -L 8789:127.0.0.1:8789 user@server`，再在本机打开此地址。
 
-镜像版本在 `compose.yaml` 的第一处 `image` 中修改，维护工具共用同一镜像。修改配置后执行 `docker compose up -d`；更新镜像先执行 `docker compose pull`。部署机器上填好凭据的 Compose 文件请保留在本机。
+Compose 只运行一个服务。网站镜像版本在 `image` 中修改，CFST 版本在 Web 页面管理。修改配置后执行 `docker compose up -d`；更新镜像先执行 `docker compose pull`。部署机器上填好凭据的 Compose 文件请保留在本机。
 
 ## 运行逻辑
 
@@ -40,7 +40,9 @@ docker compose up -d
 
 默认从 Cloudflare 网段均衡抽样 128 个候选，初选最多下载测试 20 个；最终合并阶段复测全部通过延迟筛选的新旧候选。测速使用部署机器的出口，真实下载会消耗流量。CFST CSV 的速度按 MiB/s 换算为 Mbps 后比较。
 
-参数都在 `compose.yaml` 中。需要自定义候选时，创建 `config/candidates.txt`，每行一个 Cloudflare IP，设置 `CANDIDATE_FILE: "/config/candidates.txt"` 并启用文件内的 `./config:/config:ro` 挂载。候选为 3～512 个去重 IP，不接受 CIDR。
+默认参数已经内置：延迟 100 ms、带宽 30 Mbps、每小时检查、128 个候选、下载测试 20 个、单 IP 10 秒。需要调整时，在 Compose 的 `environment` 中添加 `MAX_LATENCY_MS`、`MIN_BANDWIDTH_MBPS`、`CHECK_INTERVAL_SECONDS`、`CANDIDATE_COUNT`、`DOWNLOAD_COUNT` 或 `DOWNLOAD_SECONDS`，数值使用带引号的字符串。
+
+需要自定义候选时，创建 `config/candidates.txt`，每行一个 Cloudflare IP，在 `environment` 添加 `CANDIDATE_FILE: "/config/candidates.txt"`，在 `volumes` 添加 `./config:/config:ro`。候选为 3～512 个去重 IP，不接受 CIDR。
 
 ## 状态与数据
 
@@ -52,33 +54,18 @@ docker compose down
 
 `cfst-data` 保存状态，`cfst-bin` 保存 CFST 二进制。更新容器保留这两个命名卷；迁移时保持部署目录或 Compose 项目名，并保留原有卷。`docker compose down -v` 会删除两者。
 
-## CFST 升级
+## CFST 版本管理
 
-CFST 独立保存在 `/opt/cfst`，首次初始化为官方 v2.3.5。更新网站镜像保留卷内选定的版本。
+Web 页面的 **CFST** 区域提供：
 
-查看当前版本：
+- **检查更新**：从 XIU2 官方 GitHub 发布读取适合当前架构的版本。
+- **安装并切换**：选择官方版本后，自动下载、校验 SHA-256 和架构，并检查实际下载、CSV 和 429 兼容性。
+- **切换版本**：选择已安装版本，重新校验后启用。
+- **回滚**：恢复上一个版本。
 
-```sh
-docker compose run --rm --no-deps cfst-tools status
-```
+测速或 DNS 任务运行时，版本操作暂不可用。切换成功后直接用于下一次测速，清除旧的待写入结果；失败保留原版本和 DNS。操作不需要停止容器，不需要填写哈希。
 
-升级前停止主服务，将版本和哈希替换为实际值。SHA-256 对应官方 `cfst_linux_amd64.tar.gz` 或 `cfst_linux_arm64.tar.gz` 整个归档文件：
-
-```sh
-docker compose stop cfst-dns
-docker compose run --rm --no-deps cfst-tools upgrade --version vX.Y.Z --sha256 填写64位SHA256
-docker compose up -d cfst-dns
-```
-
-升级会校验哈希、架构、命令参数，并通过回环 HTTP 检查下载、CSV 和 429 输出；失败保留旧版本，不访问 Cloudflare API 或修改 DNS。
-
-回滚：
-
-```sh
-docker compose stop cfst-dns
-docker compose run --rm --no-deps cfst-tools rollback
-docker compose up -d cfst-dns
-```
+版本保存在 `cfst-bin` 卷中，更新网站镜像会保留选定版本。官方版本列表缓存 10 分钟；无法连接 GitHub 时，仍可切换已安装版本或回滚。
 
 ## 源码与发布
 

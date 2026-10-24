@@ -17,13 +17,14 @@ import subprocess
 import tempfile
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import ProxyHandler, Request, build_opener
 
 from cloudflare import API, CF_NETWORKS, NoRedirect, is_cloudflare_ip, validate_domain, validate_url
+from cfst_manager import InstallError, ReleaseCatalog, Store, TAG, RELEASE_ID
 
 LOG = logging.getLogger("cfst-dns")
 ROOT = Path(__file__).resolve().parent
@@ -525,31 +526,77 @@ class Maintainer:
             self.write()
 
 
+class CFSTControl:
+    def __init__(self, store, smoke=None):
+        self.store = store
+        self.catalog = ReleaseCatalog(store.arch)
+        self.smoke = smoke
+
+    def snapshot(self):
+        data = self.catalog.snapshot()
+        try:
+            return data | self.store.inventory()
+        except (InstallError, OSError, ValueError, KeyError):
+            return data | {"installed": [], "current": None, "previous": None, "arch": self.store.arch,
+                           "error": "CFST 版本信息读取失败，请检查数据卷"}
+
+    def change(self, action, target):
+        lock = acquire_lock(self.store.home/"install.lock")
+        try:
+            kwargs = {"smoke": self.smoke} if self.smoke is not None else {}
+            if action == "install":
+                self.store.upgrade(target, self.catalog.resolve(target), **kwargs)
+            elif action == "switch":
+                self.store.select(target, **kwargs)
+            elif action == "rollback":
+                self.store.rollback(**kwargs)
+            else:
+                raise ServiceError("未知 CFST 操作")
+            return self.store.release(self.store.state()["active"])
+        finally:
+            lock.close()
+
+
 class TaskController:
     """Reserve execution before acknowledging HTTP; share one lock with cron."""
-    def __init__(self, service):
+    def __init__(self, service, cfst=None):
         self.service = service
+        self.cfst = cfst
         self.lock = threading.Lock()
         self.worker = None
         service.status.update(manual_enabled=True)
 
     def snapshot(self):
         data = self.service.status.snapshot()
+        data["cfst"] = self.cfst.snapshot() if self.cfst else None
         data["actions"] = self.service.actions()
         if data["busy"]:
             data["actions"] = dict.fromkeys(ACTIONS, "任务运行中")
         return data
 
-    def run_reserved(self, action, initial=False):
+    def run_reserved(self, action, initial=False, target=None):
         try:
-            if action == "automatic":
+            if action.startswith("cfst_"):
+                self.service.status.update(phase="cfst_changing", message="正在校验并切换 CFST", cfst_message="正在校验并切换 CFST")
+                binary, metadata = self.cfst.change(action[5:], target)
+                cfg = replace(self.service.cfg, binary=str(binary), cfst_version=metadata["version"])
+                self.service.cfg, self.service.runner = cfg, CFSTRunner(cfg, self.service.stop)
+                self.service.records, self.service.read_at = None, 0
+                self.service.new_top, self.service.selected_at = None, 0
+                self.service.final, self.service.compared_at = [], 0
+                self.service.status.update(engine="CFST " + metadata["version"], phase="cfst_ready",
+                                           results=[], steps={}, proposed_ips=[],
+                                           cfst_message=f"已启用 {metadata['version']}",
+                                           message=f"CFST 已切换到 {metadata['version']}")
+            elif action == "automatic":
                 self.service.cycle(initial=initial)
             else:
                 getattr(self.service, action)()
         except Exception as error:
-            message = str(error) if isinstance(error, ServiceError) else "任务失败；请检查容器日志和文件配置"
-            self.service.status.update(phase="error", message=message)
-            if not isinstance(error, (ServiceError, OSError, ValueError)):
+            message = str(error) if isinstance(error, (ServiceError, InstallError)) else "任务失败；请检查容器日志和文件配置"
+            values = {"cfst_message": message} if action.startswith("cfst_") else {}
+            self.service.status.update(phase="error", message=message, **values)
+            if not isinstance(error, (ServiceError, InstallError, OSError, ValueError)):
                 LOG.error("任务异常：%s", type(error).__name__)
         finally:
             self.service.status.update(busy=False, active_action=None)
@@ -559,11 +606,15 @@ class TaskController:
         if not self.lock.acquire(blocking=False):
             raise ServiceError("已有任务运行中，请稍后再试")
         try:
-            if action != "automatic":
+            if action.startswith("cfst_"):
+                if self.cfst is None or self.service.stop.is_set():
+                    raise ServiceError("CFST 管理不可用")
+            elif action != "automatic":
                 self.service.require_action(action)
             elif self.service.stop.is_set():
                 raise ServiceError("服务已停止")
-            self.service.status.update(busy=True, active_action=action, last_run=time.time())
+            values = {} if action.startswith("cfst_") else {"last_run": time.time()}
+            self.service.status.update(busy=True, active_action=action, **values)
         except Exception:
             self.lock.release()
             raise
@@ -585,6 +636,22 @@ class TaskController:
             return False
         self.run_reserved("automatic", initial)
         return True
+
+    def start_cfst(self, action, target=None):
+        if (action not in ("install", "switch", "rollback") or
+                (action == "install" and (not isinstance(target, str) or not re.fullmatch(TAG, target))) or
+                (action == "switch" and (not isinstance(target, str) or not re.fullmatch(RELEASE_ID, target))) or
+                (action == "rollback" and target is not None)):
+            raise ServiceError("CFST 操作参数无效")
+        self.reserve("cfst_" + action)
+        try:
+            self.worker = threading.Thread(target=self.run_reserved,
+                                           args=("cfst_" + action,), kwargs={"target": target}, daemon=True)
+            self.worker.start()
+        except Exception:
+            self.service.status.update(busy=False, active_action=None)
+            self.lock.release()
+            raise
 
 
 def make_dashboard(status, controller=None):
@@ -626,7 +693,7 @@ def make_dashboard(status, controller=None):
         def do_POST(self):
             if not self.local_request(mutation=True):
                 return
-            if self.path != "/api/actions":
+            if self.path not in ("/api/actions", "/api/cfst"):
                 self.send_json(404, {"error": "接口不存在"})
                 return
             if self.headers.get("Content-Type", "").split(";", 1)[0] != "application/json":
@@ -638,7 +705,16 @@ def make_dashboard(status, controller=None):
                     raise ValueError()
                 self.connection.settimeout(5)
                 data = json.loads(self.rfile.read(length))
-                if not isinstance(data, dict) or set(data) != {"action"} or data["action"] not in ACTIONS:
+                if not isinstance(data, dict):
+                    raise ValueError()
+                if self.path == "/api/actions":
+                    if set(data) != {"action"} or data["action"] not in ACTIONS:
+                        raise ValueError()
+                elif not ((data.get("action") == "rollback" and set(data) == {"action"}) or
+                          (data.get("action") == "install" and set(data) == {"action", "version"}
+                           and isinstance(data["version"], str) and re.fullmatch(TAG, data["version"])) or
+                          (data.get("action") == "switch" and set(data) == {"action", "release_id"}
+                           and isinstance(data["release_id"], str) and re.fullmatch(RELEASE_ID, data["release_id"]))):
                     raise ValueError()
             except (ValueError, TypeError, OSError):
                 self.send_json(400, {"error": "步骤参数无效"})
@@ -647,7 +723,10 @@ def make_dashboard(status, controller=None):
                 self.send_json(503, {"error": "预览模式，请先配置部署"})
                 return
             try:
-                controller.start(data["action"])
+                if self.path == "/api/cfst":
+                    controller.start_cfst(data["action"], data.get("version", data.get("release_id")))
+                else:
+                    controller.start(data["action"])
             except ServiceError as exc:
                 self.send_json(409, {"error": str(exc)})
                 return
@@ -658,6 +737,16 @@ def make_dashboard(status, controller=None):
                 return
             if self.path == "/api/status":
                 self.send_json(200, controller.snapshot() if controller else status.snapshot())
+                return
+            elif self.path == "/api/cfst/releases":
+                if controller is None or controller.cfst is None:
+                    self.send_json(503, {"error": "请先配置部署"})
+                    return
+                try:
+                    controller.cfst.catalog.refresh()
+                    self.send_json(200, controller.cfst.catalog.snapshot())
+                except InstallError as error:
+                    self.send_json(502, {"error": str(error)})
                 return
             elif self.path == "/health":
                 body, mime = b'{"ok":true}', "application/json"
@@ -724,7 +813,7 @@ def main():
         signal.signal(signum, lambda *_: stop.set())
     status = Status(cfg.data_dir / "status.json", cfg)
     service = Maintainer(cfg, CloudflareClient(cfg), CFSTRunner(cfg, stop), status, stop, args.dry_run)
-    controller = TaskController(service)
+    controller = TaskController(service, CFSTControl(Store(os.environ.get("CFST_HOME", "/opt/cfst"))))
     server = None
     if not args.once:
         server = ThreadingHTTPServer(("0.0.0.0", args.port), make_dashboard(status, controller))
