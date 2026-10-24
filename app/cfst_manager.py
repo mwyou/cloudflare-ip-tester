@@ -287,7 +287,7 @@ class Store:
 
     def upgrade(self, version, checksum, smoke=smoke_test):
         if not self.state()["active"]:
-            raise InstallError("请先启动服务，完成 CFST 数据卷初始化")
+            raise InstallError("请先启动服务，完成 CFST 运行目录初始化")
         # Verify the old release too, before preserving it as the rollback target.
         self.release(self.state()["active"])
         binary, metadata = download_release(version, self.arch, checksum)
@@ -390,6 +390,6 @@ if __name__ == "__main__":
             if len(detail) > 240:
                 detail = detail[:237] + "..."
             message = f"{type(error).__name__}: {detail}" if detail else type(error).__name__
-        print(f"CFST 管理失败：{message}；请检查文件权限、网络和版本数据卷，并用 status 核对当前版本",
+        print(f"CFST 管理失败：{message}；请检查运行目录权限和网络，并用 status 核对当前版本",
               file=sys.stderr)
         raise SystemExit(1)

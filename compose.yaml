@@ -1,6 +1,6 @@
 services:
   cfst-dns:
-    image: cotelforce/cloudflare-ip-tester:3.2.2
+    image: cotelforce/cloudflare-ip-tester:3.2.3
     container_name: cfst-dns
     restart: unless-stopped
     init: true
@@ -10,17 +10,9 @@ services:
     environment:
       CF_DOMAIN: ""       # 填写完整优选域名
       CF_API_TOKEN: ""    # 填写 Cloudflare API Token
-    volumes:
-      - cfst-data:/data
-      - cfst-bin:/opt/cfst
-    read_only: true
     tmpfs: ["/tmp:size=32m,mode=1777"]
     cap_drop: ["ALL"]
     security_opt: ["no-new-privileges:true"]
     logging:
       driver: json-file
       options: {max-size: "10m", max-file: "3"}
-
-volumes:
-  cfst-data:
-  cfst-bin:

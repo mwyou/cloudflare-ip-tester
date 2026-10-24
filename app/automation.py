@@ -257,7 +257,7 @@ class CFSTRunner:
                 process = subprocess.Popen(args, cwd=folder, env=env, stdout=subprocess.PIPE,
                                            stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace")
             except OSError:
-                raise ServiceError("CFST 无法启动；请检查 CFST 版本数据卷或 CFST_BIN") from None
+                raise ServiceError("CFST 无法启动；请检查 CFST 运行目录或 CFST_BIN") from None
             lines = queue.Queue()
 
             def collect():
@@ -538,7 +538,7 @@ class CFSTControl:
             return data | self.store.inventory()
         except (InstallError, OSError, ValueError, KeyError):
             return data | {"installed": [], "current": None, "previous": None, "arch": self.store.arch,
-                           "error": "CFST 版本信息读取失败，请检查数据卷"}
+                           "error": "CFST 版本信息读取失败，请检查运行目录"}
 
     def change(self, action, target):
         lock = acquire_lock(self.store.home/"install.lock")
