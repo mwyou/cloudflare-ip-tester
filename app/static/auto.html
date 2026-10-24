@@ -9,8 +9,7 @@
 <article><p>下一次检查</p><strong id="next">—</strong><small id="last">等待首次运行</small></article>
 <article class="featured"><p>运行状态</p><strong id="phase">连接中</strong></article>
 </section>
-<section class="panel interval-panel" aria-label="检查间隔"><div class="panel-title"><h2>检查间隔</h2><span class="hint">当前容器运行期间生效</span></div><div class="interval-controls"><label for="interval-minutes">每</label><input id="interval-minutes" type="number" min="1" max="1440" step="1" disabled><span>分钟检查一次</span><button type="button" id="interval-save" disabled>保存</button></div><p class="hint" id="interval-status" role="status">—</p></section>
-<section class="steps" aria-label="单步操作">
+<section class="panel interval-panel" aria-label="运行设置"><div class="panel-title"><h2>运行设置</h2><span class="hint">当前容器运行期间生效</span></div><div class="interval-controls"><label for="interval-minutes">每</label><input id="interval-minutes" type="number" min="1" max="1440" step="1" disabled><span>分钟检查一次</span><button type="button" id="interval-save" disabled>保存</button></div><p class="hint" id="interval-status" role="status">—</p><div class="record-count-controls"><label for="dns-record-count">DNS 记录</label><input id="dns-record-count" type="number" min="1" max="10" step="1" disabled><span>条</span><button type="button" id="dns-record-count-save" disabled>保存</button></div><p class="hint" id="dns-record-count-status" role="status">首次读取时自动采用现有记录数；无记录默认 3 条</p></section>\n<section class="steps" aria-label="单步操作">
 <div><button type="button" data-action="read" disabled>读取 DNS</button><small id="step-read">等待连接</small></div>
 <div><button type="button" data-action="check" disabled>检测当前 IP</button><small id="step-check">等待连接</small></div>
 <div><button type="button" data-action="select" disabled>优选新 IP</button><small id="step-select">等待连接</small></div>

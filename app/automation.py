@@ -30,6 +30,9 @@ LOG = logging.getLogger("cfst-dns")
 ROOT = Path(__file__).resolve().parent
 STEP_TTL = 1800
 MIN_INTERVAL_SECONDS = 60
+DEFAULT_RECORD_COUNT = 3
+MIN_RECORD_COUNT = 1
+MAX_RECORD_COUNT = 10
 ACTIONS = ("read", "check", "select", "compare", "write")
 
 
@@ -166,7 +169,7 @@ class CloudflareClient:
         current = self.records()
         if fingerprint(current) != fingerprint(before):
             raise ServiceError("测速期间 DNS 被其他程序修改；放弃覆盖，等待下个周期")
-        plan = dns_plan(self.settings, current, ips)
+        plan = dns_plan(self.settings, current, ips, len(ips))
         if any(plan.values()):
             self.request(f"/zones/{self.zone_id()}/dns_records/batch", body=plan)
         # A write timeout is ambiguous: never retry a mutation blindly.
@@ -181,11 +184,11 @@ def fingerprint(records):
     return json.dumps(sorted(records, key=lambda r: r.get("id", "")), sort_keys=True)
 
 
-def dns_plan(settings, records, ips):
+def dns_plan(settings, records, ips, record_count=DEFAULT_RECORD_COUNT):
     ips = [str(ipaddress.ip_address(ip)) for ip in ips]
-    if len(set(ips)) != 3 or len(ips) != 3 or not all(
+    if len(set(ips)) != record_count or len(ips) != record_count or not all(
             is_cloudflare_ip(ip) and ipaddress.ip_address(ip).version == (4 if settings.kind == "A" else 6) for ip in ips):
-        raise ServiceError("只有三个去重且属于 Cloudflare 的 IP 才能写入")
+        raise ServiceError(f"只能写入 {record_count} 个去重且属于 Cloudflare 的 IP")
     if any(r.get("type") in ("CNAME", "NS") for r in records):
         raise ServiceError("目标域名存在 CNAME / NS 冲突；请先使用独立的优选域名")
     pending = set(ips)
@@ -414,6 +417,7 @@ class Status:
         self.data = {"domain": settings.domain, "record_type": settings.kind, "engine": "CFST " + settings.cfst_version,
                      "max_latency_ms": settings.latency_ms, "min_bandwidth_mbps": settings.min_mbps,
                      "interval_seconds": settings.interval, "phase": "starting", "message": "等待首次检查",
+                     "dns_record_count": DEFAULT_RECORD_COUNT,
                      "last_run": None, "next_run": None, "last_dns_update": None,
                      "dns_ips": [], "previous_dns_ips": [], "dns_change": None,
                      "results": [], "check_results": [], "selection_results": [], "ranked_results": [],
@@ -464,6 +468,10 @@ class Maintainer:
         self.check_rows = None
         self.selection_rows = None
         self.ranked = []
+        # The first DNS read adopts the number of existing records. If there
+        # are no records, the default is three; a UI selection then overrides
+        # this value for subsequent cycles in the current container.
+        self.record_count = None
 
     def fresh(self, timestamp):
         return bool(timestamp) and 0 <= time.time() - timestamp < STEP_TTL
@@ -478,7 +486,8 @@ class Maintainer:
         dns_reason = "先读取 DNS" if self.records is None else (None if self.fresh(self.read_at) else "DNS 快照已过期，请重新读取")
         selection_reason = "先优选新 IP" if self.new_top is None else (None if self.fresh(self.selected_at) else "优选结果已过期，请重新优选")
         current_reason = None
-        if not dns_reason and len(self.valid_ips()) == 3 and self.check_rows is None:
+        target = self.record_count or DEFAULT_RECORD_COUNT
+        if not dns_reason and len(self.valid_ips()) == target and self.check_rows is None:
             current_reason = "先检测当前 IP"
         reasons["check"] = dns_reason or (None if self.valid_ips() else "DNS 中没有可测的 Cloudflare IP")
         # A comparison can rank a standalone selection before DNS is read;
@@ -486,7 +495,7 @@ class Maintainer:
         compare_dns_reason = dns_reason if self.records is not None else None
         reasons["compare"] = compare_dns_reason or selection_reason or current_reason
         reasons["write"] = dns_reason or selection_reason or (
-            "先完成综合排序，取得三个 IP" if len(self.final) != 3 else
+            f"先完成综合排序，取得 {target} 个 IP" if len(self.final) != target else
             (None if self.fresh(self.compared_at) else "排序结果已过期，请重新排序"))
         if self.stop.is_set():
             return dict.fromkeys(ACTIONS, "服务已停止")
@@ -523,8 +532,11 @@ class Maintainer:
             raise ServiceError("目标域名存在 CNAME / NS 冲突；未修改 DNS")
         self.records, self.read_at = records, time.time()
         ips = list(dict.fromkeys(r["content"] for r in records if r.get("type") == self.cfg.kind))
+        if self.record_count is None:
+            self.record_count = len(ips) or DEFAULT_RECORD_COUNT
         self.complete("read", len(ips))
-        self.status.update(phase="read_done", dns_ips=ips, message=f"已读取 {len(ips)} 个 DNS IP")
+        self.status.update(phase="read_done", dns_ips=ips, dns_record_count=self.record_count,
+                           message=f"已读取 {len(ips)} 个 DNS IP；目标保留 {self.record_count} 条")
         return ips
 
     def check(self):
@@ -543,11 +555,12 @@ class Maintainer:
         self.check_rows = rows
         good = sum(qualifies(self.cfg, row) for row in rows)
         managed = [r for r in self.records if r.get("type") == self.cfg.kind]
-        healthy = (len(managed) == len(ips) == len(rows) == good == 3 and
+        target = self.record_count or DEFAULT_RECORD_COUNT
+        healthy = (len(managed) == len(ips) == len(rows) == good == target and
                    {r["ip"] for r in rows} == set(ips) and not any(r.get("proxied") for r in managed))
         self.complete("check", good)
         self.status.update(results=rows, check_results=rows, check_time=time.time(), phase="healthy" if healthy else "check_done",
-                           message="三个 IP 均达标，保持现有 DNS" if healthy else f"检测完成：{good} / {len(ips)} 个 IP 达标")
+                           message=f"{target} 个 IP 均达标，保持现有 DNS" if healthy else f"检测完成：{good} / {len(ips)} 个 IP 达标")
         return healthy
 
     def select(self):
@@ -585,13 +598,14 @@ class Maintainer:
             merged.setdefault(row["ip"], {**row, "source": "新 IP 优选"})
         ranked = sorted(merged.values(), key=lambda r: (-r["speed_mibps"], r["latency_ms"]))
         self.ranked = ranked
-        good = ranked[:3]
+        target = self.record_count or DEFAULT_RECORD_COUNT
+        good = ranked[:target]
         self.complete("compare", len(good))
-        if len(good) < 3:
+        if len(good) < target:
             self.status.update(results=ranked, ranked_results=ranked, ranked_time=time.time(), phase="degraded",
                                message=f"综合排序后只有 {len(good)} 个结果；保留现有 DNS")
             return False
-        self.final, self.compared_at = good[:3], time.time()
+        self.final, self.compared_at = good[:target], time.time()
         for row in self.final:
             row["selected"] = True
         self.status.update(results=ranked, ranked_results=ranked, ranked_time=time.time(), proposed_ips=[r["ip"] for r in self.final],
@@ -613,20 +627,21 @@ class Maintainer:
                                                    if key not in ("compare", "write")})
         self.status.update(phase="updating", message="正在写入 DNS")
         self.client.replace(before, selected)
-        self.complete("write", 3)
+        self.complete("write", len(selected))
         now = time.time()
         old_ips = list(dict.fromkeys(r.get("content") for r in before if r.get("type") == self.cfg.kind))
         changes = {"previous_dns_ips": old_ips,
                    "dns_change": {"before": old_ips, "after": selected, "time": now}} if set(old_ips) != set(selected) else {}
         self.status.update(phase="updated", dns_ips=selected, last_dns_update=now,
-                           message="已写入并核验三个 IP", **changes)
+                           message=f"已写入并核验 {len(selected)} 个 IP", **changes)
 
     def cycle(self, initial=False):
         self.new_top, self.selected_at = None, 0
         self.status.update(last_run=time.time(), next_run=None, steps={})
         ips = self.read()
         managed = [r for r in self.records if r.get("type") == self.cfg.kind]
-        current_dns_ready = (len(managed) == len(ips) == 3 and all(
+        target = self.record_count or DEFAULT_RECORD_COUNT
+        current_dns_ready = (len(managed) == len(ips) == target and all(
                 is_cloudflare_ip(ip) for ip in ips) and not any(r.get("proxied") for r in managed))
         if current_dns_ready:
             healthy = self.check()
@@ -782,6 +797,18 @@ class TaskController:
         finally:
             self.lock.release()
 
+    def set_record_count(self, count):
+        if type(count) is not int or not MIN_RECORD_COUNT <= count <= MAX_RECORD_COUNT:
+            raise ServiceError(f"DNS 记录数量必须在 {MIN_RECORD_COUNT} 到 {MAX_RECORD_COUNT} 条之间")
+        if not self.lock.acquire(blocking=False):
+            raise ServiceError("已有任务运行中，请稍后再试")
+        try:
+            self.service.record_count = count
+            self.service.status.update(dns_record_count=count,
+                                       message=f"DNS 记录数量已改为 {count} 条")
+        finally:
+            self.lock.release()
+
     def wait_next(self, delay):
         with self.lock:
             if not self.scheduler_wakeup.is_set():
@@ -876,7 +903,10 @@ def make_dashboard(status, controller=None):
                     if set(data) != {"action"} or data["action"] not in ACTIONS:
                         raise ValueError()
                 elif self.path == "/api/settings":
-                    if set(data) != {"interval_seconds"} or type(data["interval_seconds"]) is not int:
+                    if (set(data) == {"interval_seconds"} and type(data["interval_seconds"]) is int) or \
+                       (set(data) == {"dns_record_count"} and type(data["dns_record_count"]) is int):
+                        pass
+                    else:
                         raise ValueError()
                 elif not ((data.get("action") == "rollback" and set(data) == {"action"}) or
                           (data.get("action") == "install" and set(data) == {"action", "version"}
@@ -892,7 +922,10 @@ def make_dashboard(status, controller=None):
                 return
             try:
                 if self.path == "/api/settings":
-                    controller.set_interval(data["interval_seconds"])
+                    if "interval_seconds" in data:
+                        controller.set_interval(data["interval_seconds"])
+                    else:
+                        controller.set_record_count(data["dns_record_count"])
                 elif self.path == "/api/cfst":
                     controller.start_cfst(data["action"], data.get("version", data.get("release_id")))
                 else:

@@ -51,10 +51,14 @@ td small{display:block;color:var(--muted);font:11px "Segoe UI",sans-serif}
 .cfst-panel{margin-top:20px}
 .interval-panel{margin:20px 0}
 .interval-controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.record-count-controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:14px}
 .interval-controls input{width:110px;padding:11px;color:var(--text);background:var(--bg);border:1px solid #496574;border-radius:7px;font:inherit}
+.record-count-controls input{width:90px;padding:11px;color:var(--text);background:var(--bg);border:1px solid #496574;border-radius:7px;font:inherit}
 .interval-controls button{padding:11px 14px;color:var(--text);background:var(--panel);border:1px solid #496574;border-radius:7px;font:inherit;cursor:pointer}
 .interval-controls button:hover:enabled{background:#203849;border-color:var(--mint)}
-.interval-controls button:disabled,.interval-controls input:disabled{cursor:default;opacity:.45}
+.record-count-controls button{padding:11px 14px;color:var(--text);background:var(--panel);border:1px solid #496574;border-radius:7px;font:inherit;cursor:pointer}
+.record-count-controls button:hover:enabled{background:#203849;border-color:var(--mint)}
+.interval-controls button:disabled,.interval-controls input:disabled,.record-count-controls button:disabled,.record-count-controls input:disabled{cursor:default;opacity:.45}
 .results-panel h3{margin:20px 0 8px;font-size:13px;color:var(--muted)}
 .results-panel h3:first-of-type{margin-top:4px}
 .results-panel h3 small{font-size:11px;font-weight:400}

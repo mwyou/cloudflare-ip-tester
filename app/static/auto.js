@@ -10,11 +10,12 @@ let cfstData;
 let cfstMessage = '';
 let cfstOptions = '';
 let intervalMessage = '';
+let recordCountMessage = '';
 const resultExpanded = {selection: false, ranked: false};
 function dnsItems(ips) {
   return ips?.length ? ips.map(ip => `<div class="dns-item">${esc(ip)}</div>`).join('') : '<p class="muted">暂无记录</p>';
 }
-function disableActions() { document.querySelectorAll('[data-action],.cfst-controls button,.cfst-controls select,.interval-controls button,.interval-controls input').forEach(button => { button.disabled = true; }); }
+function disableActions() { document.querySelectorAll('[data-action],.cfst-controls button,.cfst-controls select,.interval-controls button,.interval-controls input,.record-count-controls button,.record-count-controls input').forEach(button => { button.disabled = true; }); }
 function renderResultRows(selector, rows, ranked, toggleSelector, expanded) {
   const body = $(selector);
   if (!rows?.length) {
@@ -81,6 +82,10 @@ async function refresh() {
     if (document.activeElement !== intervalInput) intervalInput.value = Math.round(data.interval_seconds / 60);
     intervalInput.disabled = $('#interval-save').disabled = sending || data.busy || !data.manual_enabled;
     $('#interval-status').textContent = intervalMessage || (data.busy ? '任务运行中，稍后可修改' : `当前每 ${Math.round(data.interval_seconds / 60)} 分钟检查一次`);
+    const recordCountInput = $('#dns-record-count');
+    if (document.activeElement !== recordCountInput) recordCountInput.value = data.dns_record_count ?? 3;
+    recordCountInput.disabled = $('#dns-record-count-save').disabled = sending || data.busy || !data.manual_enabled;
+    $('#dns-record-count-status').textContent = recordCountMessage || (data.dns_record_count ? `当前每次保留 ${data.dns_record_count} 条 DNS 记录` : '首次读取时自动采用现有记录数；无记录默认 3 条');
     $('#phase').textContent = phases[data.phase] || data.phase;
     $('#notice').textContent = actionError || (data.phase === 'unconfigured' ? '预览模式，请先配置部署。' : data.message);
     $('#notice').className = actionError || ['error','degraded','unconfigured','stopped'].includes(data.phase) ? 'notice error' : 'notice';
@@ -179,6 +184,28 @@ $('#interval-save').addEventListener('click', async () => {
     if (!response.ok) throw new Error(data.error || '保存失败');
   } catch (error) {
     intervalMessage = error.message || '保存失败';
+  } finally {
+    sending = false;
+    await refresh();
+  }
+});
+$('#dns-record-count-save').addEventListener('click', async () => {
+  if (sending) return;
+  const count = Number($('#dns-record-count').value);
+  if (!Number.isInteger(count) || count < 1 || count > 10) {
+    $('#dns-record-count-status').textContent = '请输入 1 到 10 条';
+    return;
+  }
+  sending = true;
+  recordCountMessage = '';
+  disableActions();
+  $('#dns-record-count-save').disabled = true;
+  try {
+    const response = await fetch('/api/settings', {method:'POST', headers:{'Content-Type':'application/json','X-Local-Client':'cfst-dashboard'}, body:JSON.stringify({dns_record_count:count})});
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || '保存失败');
+  } catch (error) {
+    recordCountMessage = error.message || '保存失败';
   } finally {
     sending = false;
     await refresh();

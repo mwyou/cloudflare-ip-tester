@@ -90,6 +90,19 @@ class AutomationTests(unittest.TestCase):
         self.client.replace.assert_not_called()
         self.assertEqual(self.status.snapshot()["phase"], "healthy")
 
+    def test_first_read_adopts_existing_dns_record_count(self):
+        existing = IPS + [NEW[0]]
+        self.client.records.return_value = records(existing)
+        self.service.read()
+        self.assertEqual(self.service.record_count, 4)
+        self.assertEqual(self.status.snapshot()["dns_record_count"], 4)
+
+    def test_first_read_without_dns_defaults_to_three_records(self):
+        self.client.records.return_value = []
+        self.service.read()
+        self.assertEqual(self.service.record_count, 3)
+        self.assertEqual(self.status.snapshot()["dns_record_count"], 3)
+
     def test_reselection_combines_old_and_new_then_writes_final_three(self):
         self.runner.run.side_effect = [[row(ip, latency=101 if i == 0 else 70) for i, ip in enumerate(IPS)],
                                        [row(NEW[0], speed=4), row(NEW[1], speed=8), row(NEW[2], speed=6), row(IPS[0], speed=3)],
@@ -436,6 +449,15 @@ class ManualSteps(unittest.TestCase):
         for value in (True, 59, 86401):
             with self.subTest(value=value), self.assertRaises(auto.ServiceError):
                 controller.set_interval(value)
+
+    def test_dns_record_count_can_be_changed_at_runtime(self):
+        controller = auto.TaskController(self.service)
+        controller.set_record_count(6)
+        self.assertEqual(self.service.record_count, 6)
+        self.assertEqual(self.status.snapshot()["dns_record_count"], 6)
+        for value in (True, 0, 11):
+            with self.subTest(value=value), self.assertRaises(auto.ServiceError):
+                controller.set_record_count(value)
 
     def test_manual_bootstrap_comparison_uses_selection_results(self):
         self.client.records.return_value = []
