@@ -74,7 +74,6 @@ class Settings:
     candidate_file: str = ""
     data_dir: Path = Path("/data")
     ttl: int = 60
-    initial_select: bool = True
     cfst_version: str = "v2.3.5"
 
     @classmethod
@@ -100,7 +99,6 @@ class Settings:
                    validate_url(os.environ.get("CFST_URL", cls.test_url)),
                    os.environ.get("CFST_BIN", cls.binary), os.environ.get("CANDIDATE_FILE", ""),
                    Path(os.environ.get("DATA_DIR", "/data")), number("DNS_TTL", 60, 60, 86400, True),
-                   os.environ.get("INITIAL_SELECT", "true").lower() in ("true", "1", "yes"),
                    os.environ.get("CFST_VERSION", "v2.3.5"))
 
 
@@ -419,7 +417,7 @@ class Status:
                      "interval_seconds": settings.interval, "phase": "starting", "message": "等待首次检查",
                      "dns_record_count": DEFAULT_RECORD_COUNT,
                      "last_run": None, "next_run": None, "last_dns_update": None,
-                     "dns_ips": [], "previous_dns_ips": [], "dns_change": None,
+                     "dns_ips": [], "dns_history": [],
                      "results": [], "check_results": [], "selection_results": [], "ranked_results": [],
                      "check_time": None, "selection_time": None, "ranked_time": None,
                      "selection_candidate_count": None, "selection_existing_ips": [],
@@ -432,8 +430,14 @@ class Status:
                     for key in ("events", "last_dns_update", "results", "check_results", "selection_results",
                                 "ranked_results", "check_time", "selection_time", "ranked_time",
                                 "selection_candidate_count", "selection_existing_ips",
-                                "dns_ips", "previous_dns_ips", "dns_change"):
+                                "dns_ips", "dns_history"):
                         self.data[key] = previous.get(key, self.data[key])
+                    # Migrate the previous single-change display once. Only
+                    # snapshots before a successful change belong in history.
+                    if "dns_history" not in previous and previous.get("dns_change"):
+                        change = previous["dns_change"]
+                        self.data["dns_history"] = [{"ips": change["before"], "time": change["time"]}]
+                    self.data["dns_history"] = self.data["dns_history"][:2]
             except (ValueError, OSError):
                 pass
 
@@ -584,10 +588,6 @@ class Maintainer:
                            message=f"优选完成：CFST 输出 {len(self.new_top)} 条结果")
         return rows
 
-    def top(self, rows):
-        return sorted((r for r in rows if qualifies(self.cfg, r)),
-                      key=lambda r: (-r["speed_mibps"], r["latency_ms"]))[:3]
-
     def compare(self):
         self.require_action("compare")
         self.invalidate_final()
@@ -609,7 +609,7 @@ class Maintainer:
         for row in self.final:
             row["selected"] = True
         self.status.update(results=ranked, ranked_results=ranked, ranked_time=time.time(), proposed_ips=[r["ip"] for r in self.final],
-                           phase="compare_done", message="综合排序完成，前三名待写入")
+                           phase="compare_done", message=f"综合排序完成，前 {target} 名待写入")
         return True
 
     def write(self):
@@ -630,8 +630,10 @@ class Maintainer:
         self.complete("write", len(selected))
         now = time.time()
         old_ips = list(dict.fromkeys(r.get("content") for r in before if r.get("type") == self.cfg.kind))
-        changes = {"previous_dns_ips": old_ips,
-                   "dns_change": {"before": old_ips, "after": selected, "time": now}} if set(old_ips) != set(selected) else {}
+        changes = {}
+        if set(old_ips) != set(selected):
+            changes["dns_history"] = ([{"ips": old_ips, "time": now}]
+                                      + self.status.snapshot()["dns_history"])[:2]
         self.status.update(phase="updated", dns_ips=selected, last_dns_update=now,
                            message=f"已写入并核验 {len(selected)} 个 IP", **changes)
 

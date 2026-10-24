@@ -44,6 +44,57 @@ class AutomationTests(unittest.TestCase):
         self.runner = Mock()
         self.service = auto.Maintainer(self.cfg, self.client, self.runner, self.status, self.stop)
 
+    def change_dns(self, before, after):
+        self.client.records.return_value = records(before)
+        self.service.read()
+        if before:
+            self.runner.run.return_value = [row(ip) for ip in before]
+            self.service.check()
+        self.runner.run.return_value = [row(ip, speed=10) for ip in after]
+        with patch.object(auto, "candidate_pool", return_value=after):
+            self.service.select()
+        self.service.compare()
+        self.service.write()
+
+    def test_dns_history_keeps_two_previous_snapshots_newest_first(self):
+        second = ["104.18.34.1", "104.18.34.2", "104.18.34.3"]
+        self.change_dns(IPS, NEW)
+        first_time = self.status.snapshot()["dns_history"][0]["time"]
+        self.change_dns(NEW, second)
+        self.change_dns(second, IPS)
+        history = self.status.snapshot()["dns_history"]
+        self.assertEqual([entry["ips"] for entry in history], [second, NEW])
+        self.assertGreaterEqual(history[0]["time"], history[1]["time"])
+        self.assertGreaterEqual(history[1]["time"], first_time)
+        self.assertEqual(self.status.snapshot()["dns_ips"], IPS)
+        self.assertNotIn("dns_change", self.status.snapshot())
+
+    def test_unchanged_or_failed_write_preserves_dns_history(self):
+        self.change_dns(IPS, NEW)
+        history = self.status.snapshot()["dns_history"]
+        self.change_dns(NEW, list(reversed(NEW)))
+        self.assertEqual(self.status.snapshot()["dns_history"], history)
+        self.client.replace.side_effect = auto.ServiceError("write verification failed")
+        with self.assertRaises(auto.ServiceError):
+            self.change_dns(NEW, IPS)
+        self.assertEqual(self.status.snapshot()["dns_history"], history)
+        self.assertEqual(set(self.status.snapshot()["dns_ips"]), set(NEW))
+
+    def test_empty_dns_snapshot_is_recorded_on_first_write(self):
+        self.change_dns([], NEW)
+        self.assertEqual(self.status.snapshot()["dns_history"][0]["ips"], [])
+
+    def test_dns_history_reloads_and_migrates_old_status(self):
+        path = Path(self.folder.name)/"status.json"
+        path.write_text(json.dumps({"domain": self.cfg.domain, "record_type": "A",
+            "dns_change": {"before": IPS, "after": NEW, "time": 123}}))
+        state = auto.Status(path, self.cfg)
+        self.assertEqual(state.snapshot()["dns_history"], [{"ips": IPS, "time": 123}])
+        state.update(dns_history=[{"ips": NEW, "time": 456}, {"ips": IPS, "time": 123}])
+        self.assertEqual(auto.Status(path, self.cfg).snapshot()["dns_history"], state.snapshot()["dns_history"])
+        self.assertNotIn("dns_change", json.loads(path.read_text(encoding="utf-8")))
+        self.assertEqual(auto.Status(path, replace(self.cfg, domain="other.example.com")).snapshot()["dns_history"], [])
+
     def test_required_configuration_and_secret_never_in_repr(self):
         with patch.dict(os.environ, {"CF_DOMAIN": "bestcf.dpdns.org", "CF_API_TOKEN": "secret"}, clear=True):
             settings = auto.Settings.from_env()
@@ -116,8 +167,8 @@ class AutomationTests(unittest.TestCase):
         self.assertEqual(len(snapshot["check_results"]), 3)
         self.assertEqual(len(snapshot["selection_results"]), 4)
         self.assertEqual([row["ip"] for row in snapshot["ranked_results"][:3]], [NEW[1], IPS[1], IPS[2]])
-        self.assertEqual(snapshot["dns_change"]["before"], IPS)
-        self.assertEqual(snapshot["dns_change"]["after"], [NEW[1], IPS[1], IPS[2]])
+        self.assertEqual(snapshot["dns_history"][0]["ips"], IPS)
+        self.assertIsInstance(snapshot["dns_history"][0]["time"], float)
 
     def test_initial_start_selects_even_if_old_dns_is_healthy(self):
         self.runner.run.return_value = [row(ip) for ip in IPS]

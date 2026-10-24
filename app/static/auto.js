@@ -15,7 +15,7 @@ const resultExpanded = {selection: false, ranked: false};
 function dnsItems(ips) {
   return ips?.length ? ips.map(ip => `<div class="dns-item">${esc(ip)}</div>`).join('') : '<p class="muted">暂无记录</p>';
 }
-function disableActions() { document.querySelectorAll('[data-action],.cfst-controls button,.cfst-controls select,.interval-controls button,.interval-controls input,.record-count-controls button,.record-count-controls input').forEach(button => { button.disabled = true; }); }
+function disableActions() { document.querySelectorAll('[data-action],.settings-panel button,.settings-panel select,.settings-panel input').forEach(button => { button.disabled = true; }); }
 function renderResultRows(selector, rows, ranked, toggleSelector, expanded) {
   const body = $(selector);
   if (!rows?.length) {
@@ -27,9 +27,9 @@ function renderResultRows(selector, rows, ranked, toggleSelector, expanded) {
   body.innerHTML = rows.map(row => {
     const good = row.latency_ms <= currentStatus.max_latency_ms && row.bandwidth_mbps > currentStatus.min_bandwidth_mbps;
     const source = ranked ? `<td>${esc(row.source || '—')}</td>` : '';
-    return `<tr class="${row.selected?'selected':''}">${source}<td>${esc(row.ip)}<small>${esc(row.colo || '—')}</small></td><td>${row.measured === false ? '—' : Number(row.latency_ms).toFixed(2)+' ms'}</td><td>${row.measured === false ? '—' : Number(row.bandwidth_mbps).toFixed(2)+' Mbps'}</td><td class="${good?'good':'bad'}">${row.selected?'入选':good?'达标':row.measured===false?'无有效样本':row.speed_mibps>0?'未达标':'无下载样本'}</td></tr>`;
+    return `<tr class="${row.selected?'selected':''}">${source}<td class="ip-cell">${esc(row.ip)}<small>${esc(row.colo || '—')}</small></td><td>${row.measured === false ? '—' : Number(row.latency_ms).toFixed(2)+' ms'}</td><td>${row.measured === false ? '—' : Number(row.bandwidth_mbps).toFixed(2)+' Mbps'}</td><td class="${good?'good':'bad'}">${row.selected?'入选':good?'达标':row.measured===false?'无有效样本':row.speed_mibps>0?'未达标':'无下载样本'}</td></tr>`;
   }).join('');
-  body.classList.toggle('collapsed', !expanded && rows.length > 3);
+  body.classList.toggle('collapsed', Boolean(toggleSelector) && !expanded && rows.length > 3);
   const toggle = toggleSelector && $(toggleSelector);
   if (toggle) {
     toggle.hidden = rows.length <= 3;
@@ -71,6 +71,7 @@ async function refresh() {
     const data = await response.json();
     currentStatus = data;
     renderCFST(data);
+    $('#connection').classList.remove('offline');
     $('#connection').textContent = data.phase === 'unconfigured' ? '预览' : '已连接';
     $('#domain').textContent = data.domain || '未配置';
     $('#kind').textContent = `${data.record_type} 记录`;
@@ -104,8 +105,10 @@ async function refresh() {
     $('#proposal').textContent = data.proposed_ips?.length ? `待写入：${data.proposed_ips.join('、')}` : '';
     $('#dns').innerHTML = dnsItems(data.dns_ips);
     $('#updated').textContent = data.last_dns_update ? `更新于 ${date(data.last_dns_update)}` : '尚未更新';
-    const change = data.dns_change;
-    $('#dns-change').innerHTML = change ? `<strong>上次变更</strong><p class="dns-change-label">之前</p><div class="dns-list">${dnsItems(change.before)}</div><p class="dns-change-label">之后</p><div class="dns-list">${dnsItems(change.after)}</div><p class="hint">${esc(date(change.time))}</p>` : '暂无变更对比';
+    const history = (data.dns_history || []).slice(0, 2);
+    $('#dns-history').innerHTML = history.length ? history.map((entry, index) =>
+      `<section class="dns-snapshot"><div class="snapshot-title"><strong>${index === 0 ? '上次变更前' : '上上次变更前'}</strong></div><time>变更于 ${esc(date(entry.time))}</time><div class="dns-list">${dnsItems(entry.ips)}</div></section>`
+    ).join('') : '<p class="muted">暂无历史记录</p>';
     renderResultRows('#check-rows', data.check_results, false);
     // Use the DNS snapshot from selection time: writing the winners into DNS
     // must not make those new results disappear from the completed run.
@@ -120,7 +123,8 @@ async function refresh() {
     $('#events').innerHTML = data.events.length ? [...data.events].reverse().map(event=>`<li><time>${esc(date(event.time))}</time><span>${esc(event.message)}</span></li>`).join('') : '<li class="muted">等待首次检查</li>';
   } catch {
     disableActions();
-    $('#connection').textContent = '状态连接中断';
+    $('#connection').classList.add('offline');
+    $('#connection').textContent = '连接中断';
     $('#notice').textContent = '无法连接状态服务，正在自动重连；请检查 Docker 容器日志。';
     $('#notice').className = 'notice error';
   } finally { timer = setTimeout(refresh,3000); }
@@ -167,61 +171,38 @@ async function cfstRequest(action) {
 $('#cfst-refresh').addEventListener('click', () => cfstRequest('refresh'));
 $('#cfst-apply').addEventListener('click', () => cfstRequest('apply'));
 $('#cfst-rollback').addEventListener('click', () => cfstRequest('rollback'));
-$('#interval-save').addEventListener('click', async () => {
-  if (sending) return;
-  const minutes = Number($('#interval-minutes').value);
-  if (!Number.isInteger(minutes) || minutes < 1 || minutes > 1440) {
-    $('#interval-status').textContent = '请输入 1 到 1440 分钟';
-    return;
-  }
-  sending = true;
-  intervalMessage = '';
-  disableActions();
-  $('#interval-save').disabled = true;
-  try {
-    const response = await fetch('/api/settings', {method:'POST', headers:{'Content-Type':'application/json','X-Local-Client':'cfst-dashboard'}, body:JSON.stringify({interval_seconds:minutes*60})});
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || '保存失败');
-  } catch (error) {
-    intervalMessage = error.message || '保存失败';
-  } finally {
-    sending = false;
-    await refresh();
-  }
-});
-$('#dns-record-count-save').addEventListener('click', async () => {
-  if (sending) return;
-  const count = Number($('#dns-record-count').value);
-  if (!Number.isInteger(count) || count < 1 || count > 10) {
-    $('#dns-record-count-status').textContent = '请输入 1 到 10 条';
-    return;
-  }
-  sending = true;
-  recordCountMessage = '';
-  disableActions();
-  $('#dns-record-count-save').disabled = true;
-  try {
-    const response = await fetch('/api/settings', {method:'POST', headers:{'Content-Type':'application/json','X-Local-Client':'cfst-dashboard'}, body:JSON.stringify({dns_record_count:count})});
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || '保存失败');
-  } catch (error) {
-    recordCountMessage = error.message || '保存失败';
-  } finally {
-    sending = false;
-    await refresh();
-  }
-});
+function bindSetting({button, input, status, field, min, max, scale = 1, error, setMessage}) {
+  $(button).addEventListener('click', async () => {
+    if (sending) return;
+    const value = Number($(input).value);
+    if (!Number.isInteger(value) || value < min || value > max) {
+      setMessage(error);
+      $(status).textContent = error;
+      return;
+    }
+    sending = true;
+    setMessage('');
+    disableActions();
+    try {
+      const response = await fetch('/api/settings', {method:'POST', headers:{'Content-Type':'application/json','X-Local-Client':'cfst-dashboard'}, body:JSON.stringify({[field]:value * scale})});
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || '保存失败');
+    } catch (error) {
+      setMessage(error.message || '保存失败');
+    } finally {
+      sending = false;
+      await refresh();
+    }
+  });
+}
+bindSetting({button:'#interval-save', input:'#interval-minutes', status:'#interval-status', field:'interval_seconds', min:1, max:1440, scale:60, error:'请输入 1 到 1440 分钟', setMessage:message => { intervalMessage = message; }});
+bindSetting({button:'#dns-record-count-save', input:'#dns-record-count', status:'#dns-record-count-status', field:'dns_record_count', min:1, max:10, error:'请输入 1 到 10 条', setMessage:message => { recordCountMessage = message; }});
+for (const key of Object.keys(resultExpanded)) {
+  $(`#${key}-toggle`).addEventListener('click', event => {
+    resultExpanded[key] = !resultExpanded[key];
+    event.currentTarget.textContent = resultExpanded[key] ? '收起' : '展开全部';
+    event.currentTarget.setAttribute('aria-expanded', String(resultExpanded[key]));
+    $(`#${key}-rows`).classList.toggle('collapsed', !resultExpanded[key]);
+  });
+}
 refresh();
-
-document.querySelector('#selection-toggle').addEventListener('click', event => {
-  resultExpanded.selection = !resultExpanded.selection;
-  event.currentTarget.textContent = resultExpanded.selection ? '收起' : '展开全部';
-  event.currentTarget.setAttribute('aria-expanded', String(resultExpanded.selection));
-  $('#selection-rows').classList.toggle('collapsed', !resultExpanded.selection);
-});
-document.querySelector('#ranked-toggle').addEventListener('click', event => {
-  resultExpanded.ranked = !resultExpanded.ranked;
-  event.currentTarget.textContent = resultExpanded.ranked ? '收起' : '展开全部';
-  event.currentTarget.setAttribute('aria-expanded', String(resultExpanded.ranked));
-  $('#ranked-rows').classList.toggle('collapsed', !resultExpanded.ranked);
-});

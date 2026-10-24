@@ -42,7 +42,7 @@ threading.Thread(target=server.serve_forever, daemon=True).start()
 opener = build_opener(ProxyHandler({}))
 dashboard_url = f'http://{socket.gethostbyname(socket.gethostname())}:{server.server_port}'
 try:
-    for path in ('/health', '/', '/auto.js', '/auto.css', '/api/status'):
+    for path in ('/health', '/', '/auto.js', '/auto.css', '/logo.svg', '/api/status'):
         with opener.open(dashboard_url+path, timeout=5) as response:
             assert response.status == 200 and response.read(), path
     request = Request(dashboard_url+'/api/cfst',

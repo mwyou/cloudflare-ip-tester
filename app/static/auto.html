@@ -1,25 +1,89 @@
 <!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Cloudflare IP 自动优选</title><link rel="icon" href="/logo.svg" type="image/svg+xml"><link rel="stylesheet" href="/auto.css"><script src="/auto.js" defer></script></head>
-<body><div class="workspace">
-<header><h1><a href="/" class="brand"><img class="brand-mark" src="/logo.svg" alt=""><span>Cloudflare IP 自动优选</span></a></h1><span class="connection" id="connection">连接中</span></header>
-<div class="notice" role="status" id="notice">正在读取任务状态…</div>
-<section class="metrics" aria-label="任务概览">
-<article><p>域名</p><strong id="domain">—</strong><small id="kind">—</small></article>
-<article><p>检测标准</p><strong id="threshold">≤ 100 ms</strong><small id="bandwidth">&gt; 30 Mbps</small></article>
-<article><p>下一次检查</p><strong id="next">—</strong><small id="last">等待首次运行</small></article>
-<article class="featured"><p>运行状态</p><strong id="phase">连接中</strong></article>
-</section>
-<section class="panel interval-panel" aria-label="运行设置"><div class="panel-title"><h2>运行设置</h2><span class="hint">当前容器运行期间生效</span></div><div class="interval-controls"><label for="interval-minutes">每</label><input id="interval-minutes" type="number" min="1" max="1440" step="1" disabled><span>分钟检查一次</span><button type="button" id="interval-save" disabled>保存</button></div><p class="hint" id="interval-status" role="status">—</p><div class="record-count-controls"><label for="dns-record-count">DNS 记录</label><input id="dns-record-count" type="number" min="1" max="10" step="1" disabled><span>条</span><button type="button" id="dns-record-count-save" disabled>保存</button></div><p class="hint" id="dns-record-count-status" role="status">首次读取时自动采用现有记录数；无记录默认 3 条</p></section>\n<section class="steps" aria-label="单步操作">
-<div><button type="button" data-action="read" disabled>读取 DNS</button><small id="step-read">等待连接</small></div>
-<div><button type="button" data-action="check" disabled>检测当前 IP</button><small id="step-check">等待连接</small></div>
-<div><button type="button" data-action="select" disabled>优选新 IP</button><small id="step-select">等待连接</small></div>
-<div><button type="button" data-action="compare" disabled>综合排序</button><small id="step-compare">等待连接</small></div>
-<div><button type="button" data-action="write" disabled>写入 DNS</button><small id="step-write">等待连接</small></div>
-</section>
-<div class="main-grid"><section class="panel"><div class="panel-title"><h2>DNS 记录</h2><span class="pill">灰云</span></div><div id="dns" class="dns-list"><p class="muted">暂无记录</p></div><p class="hint" id="updated">尚未更新</p><div id="dns-change" class="dns-change muted">暂无变更对比</div></section>
-<section class="panel results-panel"><div class="panel-title"><h2>测速结果</h2></div><p class="proposal" id="proposal" hidden></p><h3>当前 IP 检测 <small id="check-time"></small></h3><div class="table-wrap"><table><thead><tr><th>IP / 地区</th><th>TCP 延迟</th><th>下载带宽 ↓</th><th>状态</th></tr></thead><tbody id="check-rows"><tr><td colspan="4" class="empty">暂无检测结果</td></tr></tbody></table></div><h3>CFST 新 IP 结果 <small id="selection-count"></small> <small id="selection-time"></small></h3><p class="hint">下载仅测试部分候选，零值可能表示未测下载。</p><div class="table-wrap"><table><thead><tr><th>IP / 地区</th><th>TCP 延迟</th><th>下载带宽 ↓</th><th>状态</th></tr></thead><tbody id="selection-rows"><tr><td colspan="4" class="empty">暂无新 IP 结果</td></tr></tbody></table></div><button type="button" class="result-toggle" id="selection-toggle" hidden>展开全部</button><h3>综合排序 <small id="ranked-time"></small></h3><div class="table-wrap"><table><thead><tr><th>来源</th><th>IP / 地区</th><th>TCP 延迟</th><th>下载带宽 ↓</th><th>状态</th></tr></thead><tbody id="ranked-rows"><tr><td colspan="5" class="empty">暂无排序结果</td></tbody></table></div><button type="button" class="result-toggle" id="ranked-toggle" hidden>展开全部</button></section></div>
-<section class="panel cfst-panel" aria-label="CFST 版本管理"><div class="panel-title"><h2>CFST</h2><span id="cfst-current" class="pill">读取中</span></div>
-<div class="cfst-controls"><label for="cfst-version">版本</label><select id="cfst-version" disabled><option>读取中</option></select><button type="button" id="cfst-refresh" disabled>检查更新</button><button type="button" id="cfst-apply" disabled>切换版本</button><button type="button" id="cfst-rollback" disabled>回滚</button></div>
-<p class="hint" id="cfst-status" role="status">—</p></section>
-<details class="panel history"><summary>运行记录</summary><ol id="events"><li class="muted">暂无记录</li></ol></details>
-</div></body></html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#f6821f">
+  <title>Cloudflare IP 自动优选</title>
+  <link rel="icon" href="/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/auto.css">
+  <script src="/auto.js" defer></script>
+</head>
+<body>
+<div class="workspace">
+  <header>
+    <h1><a href="/" class="brand"><img class="brand-mark" src="/logo.svg" alt=""><span>Cloudflare IP 自动优选</span></a></h1>
+    <span class="connection" id="connection">连接中</span>
+  </header>
+  <main>
+    <div class="notice" role="status" id="notice">正在读取任务状态…</div>
+    <section class="metrics" aria-label="任务概览">
+      <article><p>优选域名</p><strong id="domain">—</strong><small id="kind">—</small></article>
+      <article><p>检测标准</p><strong id="threshold">≤ 100 ms</strong><small id="bandwidth">&gt; 30 Mbps</small></article>
+      <article><p>下一次检查</p><strong id="next">—</strong><small id="last">等待首次运行</small></article>
+      <article class="featured"><p>运行状态</p><strong id="phase">连接中</strong></article>
+    </section>
+    <section class="panel settings-panel" aria-label="运行设置">
+      <div class="panel-title"><h2>运行设置</h2><span class="hint">当前容器运行期间生效</span></div>
+      <div class="settings-grid">
+        <div class="setting">
+          <label for="interval-minutes">检查间隔</label>
+          <div class="setting-controls"><input id="interval-minutes" type="number" min="1" max="1440" step="1" disabled><span>分钟</span><button type="button" id="interval-save" disabled>保存</button></div>
+          <p class="hint" id="interval-status" role="status">—</p>
+        </div>
+        <div class="setting">
+          <label for="dns-record-count">DNS 记录数量</label>
+          <div class="setting-controls"><input id="dns-record-count" type="number" min="1" max="10" step="1" disabled><span>条</span><button type="button" id="dns-record-count-save" disabled>保存</button></div>
+          <p class="hint" id="dns-record-count-status" role="status">首次读取现有数量，无记录默认 3 条</p>
+        </div>
+        <div class="setting cfst-setting">
+          <div class="setting-title"><label for="cfst-version">CFST 版本</label><span id="cfst-current" class="pill">读取中</span></div>
+          <div class="cfst-controls"><select id="cfst-version" disabled><option>读取中</option></select><button type="button" id="cfst-refresh" disabled>检查更新</button><button type="button" id="cfst-apply" disabled>切换版本</button><button type="button" id="cfst-rollback" disabled>回滚</button></div>
+          <p class="hint" id="cfst-status" role="status">—</p>
+        </div>
+      </div>
+    </section>
+    <section class="panel actions-panel" aria-label="单步操作">
+      <div class="panel-title"><h2>单步操作</h2></div>
+      <div class="steps">
+        <div><button type="button" data-action="read" disabled><span class="step-number" aria-hidden="true">1</span>读取 DNS</button><small id="step-read">等待连接</small></div>
+        <div><button type="button" data-action="check" disabled><span class="step-number" aria-hidden="true">2</span>检测当前 IP</button><small id="step-check">等待连接</small></div>
+        <div><button type="button" data-action="select" disabled><span class="step-number" aria-hidden="true">3</span>优选新 IP</button><small id="step-select">等待连接</small></div>
+        <div><button type="button" data-action="compare" disabled><span class="step-number" aria-hidden="true">4</span>综合排序</button><small id="step-compare">等待连接</small></div>
+        <div><button type="button" data-action="write" disabled><span class="step-number" aria-hidden="true">5</span>写入 DNS</button><small id="step-write">等待连接</small></div>
+      </div>
+    </section>
+    <div class="main-grid">
+      <section class="panel dns-panel" aria-label="DNS 记录">
+        <div class="panel-title"><h2>当前 DNS</h2><span class="pill">仅 DNS</span></div>
+        <div id="dns" class="dns-list"><p class="muted">暂无记录</p></div>
+        <p class="hint" id="updated">尚未更新</p>
+        <div class="dns-history"><h3>变更前记录 <span class="pill">最近 2 次</span></h3><div id="dns-history"><p class="muted">暂无历史记录</p></div></div>
+      </section>
+      <section class="panel results-panel" aria-label="测速结果">
+        <div class="panel-title"><h2>测速结果</h2></div>
+        <p class="proposal" id="proposal" hidden></p>
+        <section class="result-section" aria-label="当前 IP 检测">
+          <div class="result-title"><h3>当前 IP 检测</h3><time id="check-time"></time></div>
+
+          <div class="table-wrap"><table><thead><tr><th scope="col">IP / 地区</th><th scope="col">TCP 延迟</th><th scope="col">下载带宽 ↓</th><th scope="col">状态</th></tr></thead><tbody id="check-rows"><tr><td colspan="4" class="empty">暂无结果</td></tr></tbody></table></div>
+        </section>
+        <section class="result-section" aria-label="CFST 新 IP 结果">
+          <div class="result-title"><h3>CFST 新 IP 结果</h3><span id="selection-count" class="pill"></span><time id="selection-time"></time></div>
+          <p class="hint result-hint">无下载样本表示未测速或未取得有效结果。</p>
+          <div class="table-wrap"><table><thead><tr><th scope="col">IP / 地区</th><th scope="col">TCP 延迟</th><th scope="col">下载带宽 ↓</th><th scope="col">状态</th></tr></thead><tbody id="selection-rows"><tr><td colspan="4" class="empty">暂无结果</td></tr></tbody></table></div>
+          <button type="button" class="result-toggle" id="selection-toggle" aria-controls="selection-rows" aria-expanded="false" hidden>展开全部</button>
+        </section>
+        <section class="result-section" aria-label="综合排序">
+          <div class="result-title"><h3>综合排序</h3><time id="ranked-time"></time></div>
+
+          <div class="table-wrap"><table><thead><tr><th scope="col">来源</th><th scope="col">IP / 地区</th><th scope="col">TCP 延迟</th><th scope="col">下载带宽 ↓</th><th scope="col">状态</th></tr></thead><tbody id="ranked-rows"><tr><td colspan="5" class="empty">暂无结果</td></tr></tbody></table></div>
+          <button type="button" class="result-toggle" id="ranked-toggle" aria-controls="ranked-rows" aria-expanded="false" hidden>展开全部</button>
+        </section>
+      </section>
+    </div>
+    <details class="panel history"><summary>运行记录</summary><ol id="events"><li class="muted">暂无记录</li></ol></details>
+  </main>
+</div>
+</body>
+</html>
