@@ -30,17 +30,17 @@ Compose 只运行一个服务。网站镜像版本在 `image` 中修改，CFST �
 
 ## 运行逻辑
 
-1. 启动时优选新前三名，与原有 IP 合并去重，统一复测后选出达标的最终三个 IP。将 `INITIAL_SELECT` 改为 `"false"` 可在启动时先检测已有 IP。
+1. 启动时检测现有三条 DNS，再优选新 IP。将 `INITIAL_SELECT` 改为 `"false"` 可在启动时仅检测已有 IP。
 2. 每小时从 Cloudflare 读取当前记录，检测 TCP 平均延迟和下载带宽。全部满足 **延迟 ≤ 100 ms、带宽 > 30 Mbps** 就保留。
-3. 任一 IP 不达标时，重新优选新前三名，与旧 IP 合并去重、统一复测，按下载速度降序、同速按延迟升序选择最终三个。旧 IP 仍可入选。
+3. 任一 IP 不达标时，保留当前三条检测结果，并从 CFST 优选结果中取前三条达标结果；两组结果直接按下载速度降序、同速按延迟升序排序，不再进行第三次测速，取前三个唯一 IP。
 4. 只有最终凑齐三个合格 IP 才同步目标域名的 A 记录，灰云、TTL 60 秒。其他名称和记录类型保留；`RECORD_TYPE` 可改为 `"AAAA"`。
-5. 测速或 API 报错、合格 IP 不足时保留原 DNS；429 限流时结束本周期，等待下次检查。
+5. 测速或 API 报错、合格 IP 不足时保留原 DNS；429 限流时结束本周期，等待下次检查。页面会显示当前检测结果、新 IP 优选结果（最多 10 条）、六条排序结果和 DNS 变更前后记录。
 
-页面中的“读取 DNS、检测当前 IP、优选新 IP、合并复测、写入 DNS”可单独启动，不会自动继续下一步。手动步骤与定时任务共用执行锁；待写入结果有效期 30 分钟，写入前再次核对 DNS 快照。
+页面中的“读取 DNS、检测当前 IP、优选新 IP、六个结果排序、写入 DNS”可单独启动，不会自动继续下一步。手动步骤与定时任务共用执行锁；待写入结果有效期 30 分钟，写入前再次核对 DNS 快照。检查间隔可以在页面修改，范围为 1～1440 分钟，修改只在当前容器运行期间生效。
 
-默认从 Cloudflare 网段均衡抽样 128 个候选，初选最多下载测试 20 个；最终合并阶段复测全部通过延迟筛选的新旧候选。测速使用部署机器的出口，真实下载会消耗流量。CFST CSV 的速度按 MiB/s 换算为 Mbps 后比较。
+默认从 Cloudflare 网段均衡抽样 128 个候选，优选阶段最多下载测试 20 个。测速使用部署机器的出口，真实下载会消耗流量。CFST CSV 的速度按 MiB/s 换算为 Mbps 后比较。
 
-默认参数已经内置：延迟 100 ms、带宽 30 Mbps、每小时检查、128 个候选、下载测试 20 个、单 IP 10 秒，测速地址为 CFST 官方默认的 `https://cf.xiu2.xyz/url`。需要调整时，在 Compose 的 `environment` 中添加 `MAX_LATENCY_MS`、`MIN_BANDWIDTH_MBPS`、`CHECK_INTERVAL_SECONDS`、`CANDIDATE_COUNT`、`DOWNLOAD_COUNT`、`DOWNLOAD_SECONDS` 或 `CFST_URL`，数值使用带引号的字符串。
+默认参数已经内置：延迟 100 ms、带宽 30 Mbps、每小时检查、128 个候选、下载测试 20 个、单 IP 10 秒，测速地址为 `https://cf.xiu2.xyz/url`。延迟、带宽和候选参数需要调整时，在 Compose 的 `environment` 中添加 `MAX_LATENCY_MS`、`MIN_BANDWIDTH_MBPS`、`CANDIDATE_COUNT`、`DOWNLOAD_COUNT`、`DOWNLOAD_SECONDS` 或 `CFST_URL`，数值使用带引号的字符串；检查间隔直接在页面设置。
 
 需要自定义候选时，创建 `config/candidates.txt`，每行一个 Cloudflare IP，在 `environment` 添加 `CANDIDATE_FILE: "/config/candidates.txt"`，在 `volumes` 添加 `./config:/config:ro`。候选为 3～512 个去重 IP，不接受 CIDR。
 

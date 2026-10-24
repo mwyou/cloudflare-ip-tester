@@ -44,6 +44,17 @@ td small{display:block;color:var(--muted);font:11px "Segoe UI",sans-serif}
 .good{color:var(--mint)}
 .bad{color:var(--orange)}
 .cfst-panel{margin-top:20px}
+.interval-panel{margin-top:20px}
+.interval-controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.interval-controls input{width:110px;padding:11px;color:var(--text);background:var(--bg);border:1px solid #496574;border-radius:7px;font:inherit}
+.interval-controls button{padding:11px 14px;color:var(--text);background:var(--panel);border:1px solid #496574;border-radius:7px;font:inherit;cursor:pointer}
+.interval-controls button:hover:enabled{background:#203849;border-color:var(--mint)}
+.interval-controls button:disabled,.interval-controls input:disabled{cursor:default;opacity:.45}
+.results-panel h3{margin:20px 0 8px;font-size:13px;color:var(--muted)}
+.results-panel h3:first-of-type{margin-top:4px}
+.results-panel h3 small{font-size:11px;font-weight:400}
+.dns-change{margin-top:18px;padding-top:14px;border-top:1px solid var(--line);font-size:12px;line-height:1.8}
+.dns-change strong{color:var(--mint);font-weight:500}
 .cfst-controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .cfst-controls label{font-size:12px;color:var(--muted)}
 .cfst-controls select{min-width:180px;flex:1;padding:12px;color:var(--text);background:var(--bg);border:1px solid #496574;border-radius:7px;font:inherit}

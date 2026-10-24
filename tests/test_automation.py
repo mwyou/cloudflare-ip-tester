@@ -13,7 +13,7 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import automation as auto
 
@@ -51,9 +51,11 @@ class AutomationTests(unittest.TestCase):
             self.assertNotIn("secret", repr(settings))
         for env in ({"CF_DOMAIN": "cf.example.com"}, {"CF_DOMAIN": "cf.example.com", "CF_API_TOKEN": "t", "CF_API_KEY": "k"},
                     {"CF_DOMAIN": "cf.example.com", "CF_API_TOKEN": "t", "MIN_BANDWIDTH_MBPS": "nan"},
-                    {"CF_DOMAIN": "cf.example.com", "CF_API_TOKEN": "t", "CHECK_INTERVAL_SECONDS": "60"}):
+                    {"CF_DOMAIN": "cf.example.com", "CF_API_TOKEN": "t", "CHECK_INTERVAL_SECONDS": "0"}):
             with self.subTest(env=env), patch.dict(os.environ, env, clear=True), self.assertRaises(ValueError):
                 auto.Settings.from_env()
+        with patch.dict(os.environ, {"CF_DOMAIN": "cf.example.com", "CF_API_TOKEN": "t", "CHECK_INTERVAL_SECONDS": "60"}, clear=True):
+            self.assertEqual(auto.Settings.from_env().interval, 60)
 
     def test_secret_file_and_global_key(self):
         secret = Path(self.folder.name)/"secret"
@@ -91,75 +93,77 @@ class AutomationTests(unittest.TestCase):
     def test_reselection_combines_old_and_new_then_writes_final_three(self):
         self.runner.run.side_effect = [[row(ip, latency=101 if i == 0 else 70) for i, ip in enumerate(IPS)],
                                        [row(NEW[0], speed=4), row(NEW[1], speed=8), row(NEW[2], speed=6), row(IPS[0], speed=3)],
-                                       [row(IPS[0], speed=10), row(IPS[1], speed=5), row(IPS[2], speed=1),
-                                        row(NEW[0], speed=4), row(NEW[1], speed=8), row(NEW[2], speed=6)]]
+                                       ]
         with patch.object(auto, "candidate_pool", return_value=IPS+NEW):
             self.service.cycle()
-        # Even an old IP that triggered selection can recover and beat the newcomers.
-        self.assertEqual(self.runner.run.call_args_list[-1].args, (IPS+[NEW[1], NEW[2], NEW[0]], 6))
-        self.client.replace.assert_called_once_with(records(), [IPS[0], NEW[1], NEW[2]])
-        self.assertEqual(self.status.snapshot()["dns_ips"], [IPS[0], NEW[1], NEW[2]])
+        self.assertEqual([call.args for call in self.runner.run.call_args_list], [(IPS, 3), (IPS+NEW, 20)])
+        self.client.replace.assert_called_once_with(records(), [NEW[1], IPS[1], IPS[2]])
+        snapshot = self.status.snapshot()
+        self.assertEqual(snapshot["dns_ips"], [NEW[1], IPS[1], IPS[2]])
+        self.assertEqual(len(snapshot["check_results"]), 3)
+        self.assertEqual(len(snapshot["selection_results"]), 4)
+        self.assertEqual([row["ip"] for row in snapshot["ranked_results"][:3]], [NEW[1], IPS[1], IPS[2]])
+        self.assertEqual(snapshot["dns_change"]["before"], IPS)
+        self.assertEqual(snapshot["dns_change"]["after"], [NEW[1], IPS[1], IPS[2]])
 
     def test_initial_start_selects_even_if_old_dns_is_healthy(self):
-        self.runner.run.return_value = [row(ip) for ip in NEW]
+        self.runner.run.return_value = [row(ip, speed=8) for ip in NEW]
         with patch.object(auto, "candidate_pool", return_value=NEW):
             self.service.cycle(initial=True)
-        self.assertEqual([call.args for call in self.runner.run.call_args_list], [(NEW, 20), (IPS+NEW, 6)])
+        self.assertEqual([call.args for call in self.runner.run.call_args_list], [(IPS, 3), (NEW, 20)])
         self.client.replace.assert_called_once()
 
     def test_start_without_records_bootstraps(self):
         self.client.records.return_value = []
-        self.runner.run.return_value = [row(ip) for ip in NEW]
+        self.runner.run.return_value = [row(ip, speed=8) for ip in NEW]
         with patch.object(auto, "candidate_pool", return_value=NEW):
             self.service.cycle()
         self.client.replace.assert_called_once_with([], NEW)
 
     def test_insufficient_qualifying_ips_preserves_dns_without_retry(self):
-        self.runner.run.return_value = [row(NEW[0]), row(NEW[1]), row(NEW[2], speed=1)]
+        self.runner.run.side_effect = [[row(ip) for ip in IPS], [row(NEW[0]), row(NEW[1]), row(NEW[2], speed=1)]]
         with patch.object(auto, "candidate_pool", return_value=NEW):
             self.service.cycle(initial=True)
         self.assertEqual(self.runner.run.call_count, 2)
-        self.client.replace.assert_not_called()
-        self.assertEqual(self.status.snapshot()["phase"], "degraded")
+        self.client.replace.assert_called_once_with(records(), [IPS[0], IPS[1], IPS[2]])
+        self.assertEqual(self.status.snapshot()["phase"], "updated")
 
     def test_overlapping_old_and_new_ips_are_retested_once(self):
-        initial = [row(IPS[0], speed=10), row(NEW[0], speed=8), row(NEW[1], speed=6)]
-        final = [row(IPS[0], speed=4), row(IPS[1], speed=12), row(IPS[2], speed=9),
-                 row(NEW[0], speed=8), row(NEW[1], speed=6)]
-        self.runner.run.side_effect = [initial, final]
+        initial = [row(IPS[0], speed=10), row(IPS[1], speed=8), row(IPS[2], speed=6)]
+        selected = [row(IPS[0], speed=4), row(NEW[0], speed=8), row(NEW[1], speed=6)]
+        self.runner.run.side_effect = [initial, selected]
         with patch.object(auto, "candidate_pool", return_value=IPS+NEW):
             self.service.cycle(initial=True)
-        self.assertEqual(self.runner.run.call_args.args, (IPS+NEW[:2], 5))
-        self.client.replace.assert_called_once_with(records(), [IPS[1], IPS[2], NEW[0]])
+        self.assertEqual([call.args for call in self.runner.run.call_args_list], [(IPS, 3), (IPS+NEW, 20)])
+        self.client.replace.assert_called_once_with(records(), [IPS[0], IPS[1], NEW[0]])
 
     def test_fewer_than_three_new_qualifiers_can_combine_with_old_ips(self):
-        self.runner.run.side_effect = [[row(NEW[0], speed=8), row(NEW[1], speed=1)],
-                                      [row(IPS[0], speed=5), row(IPS[1], speed=4), row(IPS[2], speed=1), row(NEW[0], speed=8)]]
+        self.runner.run.side_effect = [[row(ip, speed=6) for ip in IPS],
+                                      [row(NEW[0], speed=8), row(NEW[1], speed=1), row(NEW[2], speed=1)]]
         with patch.object(auto, "candidate_pool", return_value=NEW):
             self.service.cycle(initial=True)
-        self.assertEqual(self.runner.run.call_args.args, (IPS+[NEW[0]], 4))
+        self.assertEqual([call.args for call in self.runner.run.call_args_list], [(IPS, 3), (NEW, 20)])
         self.client.replace.assert_called_once_with(records(), [NEW[0], IPS[0], IPS[1]])
 
     def test_final_ranking_does_not_reuse_fast_preliminary_samples(self):
-        self.runner.run.side_effect = [[row(ip, speed=20) for ip in NEW],
-                                      [row(IPS[0], speed=7), row(IPS[1], speed=6), row(IPS[2], latency=110)] +
+        self.runner.run.side_effect = [[row(ip, latency=110) for ip in IPS],
                                       [row(ip, speed=1) for ip in NEW]]
         with patch.object(auto, "candidate_pool", return_value=NEW):
             self.service.cycle(initial=True)
         self.client.replace.assert_not_called()
         self.assertEqual(self.status.snapshot()["phase"], "degraded")
-        self.assertTrue(all(r["speed_mibps"] == 1 for r in self.status.snapshot()["results"] if r["ip"] in NEW))
+        self.assertTrue(all(r["speed_mibps"] == 1 for r in self.status.snapshot()["selection_results"]))
 
     def test_rate_limit_during_combined_retest_preserves_dns(self):
-        self.runner.run.side_effect = [[row(ip) for ip in NEW], auto.RateLimited("429")]
+        self.runner.run.side_effect = [[row(ip) for ip in IPS], auto.RateLimited("429")]
         with patch.object(auto, "candidate_pool", return_value=NEW), self.assertRaises(auto.RateLimited):
             self.service.cycle(initial=True)
         self.client.replace.assert_not_called()
 
     def test_equal_final_speeds_prefer_lower_latency(self):
-        final = [row(IPS[0], speed=6, latency=90), row(IPS[1], speed=6, latency=70),
-                 row(IPS[2], speed=6, latency=80), row(NEW[0], speed=6, latency=60)]
-        self.runner.run.side_effect = [[row(NEW[0])], final]
+        current = [row(IPS[0], speed=6, latency=90), row(IPS[1], speed=6, latency=70), row(IPS[2], speed=6, latency=80)]
+        selected = [row(NEW[0], speed=6, latency=60)]
+        self.runner.run.side_effect = [current, selected]
         with patch.object(auto, "candidate_pool", return_value=NEW):
             self.service.cycle(initial=True)
         self.client.replace.assert_called_once_with(records(), [NEW[0], IPS[1], IPS[2]])
@@ -333,11 +337,13 @@ class ManualSteps(unittest.TestCase):
 
     def prepare_final(self):
         self.run_step("read")
+        if self.service.valid_ips():
+            self.run_step("check")
         with patch.object(auto, "candidate_pool", return_value=NEW):
             self.run_step("select")
         self.run_step("compare")
 
-    def test_each_step_runs_only_itself_and_write_requires_final_retest(self):
+    def test_each_step_runs_only_itself_and_write_uses_existing_results(self):
         self.run_step("read")
         self.client.records.assert_called_once()
         self.runner.run.assert_not_called()
@@ -348,7 +354,7 @@ class ManualSteps(unittest.TestCase):
         self.assertEqual(self.status.snapshot()["phase"], "check_done")
         with self.assertRaises(auto.ServiceError):
             self.controller.start("write")
-        self.runner.run.return_value = [row(ip) for ip in NEW]
+        self.runner.run.return_value = [row(ip, speed=8) for ip in NEW]
         with patch.object(auto, "candidate_pool", return_value=NEW):
             self.run_step("select")
         self.assertEqual(self.runner.run.call_count, 2)
@@ -356,11 +362,11 @@ class ManualSteps(unittest.TestCase):
         self.client.records.assert_called_once()
         self.client.replace.assert_not_called()
         self.run_step("compare")
-        self.runner.run.assert_called_with(IPS+NEW, 6)
+        self.assertEqual(self.runner.run.call_count, 2)
         self.client.replace.assert_not_called()
         self.assertEqual(self.status.snapshot()["proposed_ips"], NEW)
         self.run_step("write")
-        self.assertEqual(self.runner.run.call_count, 3)
+        self.assertEqual(self.runner.run.call_count, 2)
         self.client.replace.assert_called_once_with(records(), NEW)
         self.assertEqual(self.status.snapshot()["proposed_ips"], [])
         with self.assertRaises(auto.ServiceError):
@@ -371,17 +377,27 @@ class ManualSteps(unittest.TestCase):
             self.run_step("select")
         self.client.records.assert_not_called()
         self.client.replace.assert_not_called()
-        self.assertIsNotNone(self.controller.snapshot()["actions"]["compare"])
-        self.run_step("read")
         self.assertIsNone(self.controller.snapshot()["actions"]["compare"])
         self.run_step("compare")
         self.assertEqual(self.status.snapshot()["proposed_ips"], NEW)
 
-    def test_manual_bootstrap_comparison_retests_candidates(self):
+    def test_interval_can_be_changed_at_runtime(self):
+        wakeup = threading.Event()
+        controller = auto.TaskController(self.service, scheduler_wakeup=wakeup)
+        controller.set_interval(120)
+        self.assertEqual(self.service.cfg.interval, 120)
+        self.assertEqual(self.service.runner.settings.interval, 120)
+        self.assertEqual(self.status.snapshot()["interval_seconds"], 120)
+        self.assertTrue(wakeup.is_set())
+        for value in (True, 59, 86401):
+            with self.subTest(value=value), self.assertRaises(auto.ServiceError):
+                controller.set_interval(value)
+
+    def test_manual_bootstrap_comparison_uses_selection_results(self):
         self.client.records.return_value = []
         self.prepare_final()
-        self.assertEqual(self.runner.run.call_count, 2)
-        self.runner.run.assert_called_with(NEW, 3)
+        self.assertEqual(self.runner.run.call_count, 1)
+        self.runner.run.assert_called_with(NEW, 20)
         self.client.replace.assert_not_called()
 
     def test_missing_preconditions_do_not_run_other_steps(self):
@@ -412,14 +428,12 @@ class ManualSteps(unittest.TestCase):
                 self.assertIsNotNone(self.controller.snapshot()["actions"]["write"])
         self.client.replace.assert_not_called()
 
-    def test_failed_retest_never_reuses_previous_proposal(self):
+    def test_sorting_does_not_run_a_third_speedtest(self):
         self.prepare_final()
         self.runner.run.side_effect = auto.RateLimited("429")
         self.run_step("compare")
-        self.assertEqual(self.status.snapshot()["phase"], "error")
-        self.assertEqual(self.status.snapshot()["proposed_ips"], [])
-        with self.assertRaises(auto.ServiceError):
-            self.controller.start("write")
+        self.assertEqual(self.status.snapshot()["phase"], "compare_done")
+        self.assertEqual(self.status.snapshot()["proposed_ips"], NEW)
         self.client.replace.assert_not_called()
 
     def test_failed_api_write_consumes_proposal_and_cannot_retry_blindly(self):
@@ -486,7 +500,8 @@ class ManualSteps(unittest.TestCase):
 
     def test_insufficient_manual_finalists_cannot_write(self):
         self.prepare_final()
-        self.runner.run.return_value = [row(NEW[0]), row(NEW[1])]
+        self.service.new_top = [row(NEW[0]), row(NEW[1])]
+        self.service.check_rows = [row(IPS[0], speed=1), row(IPS[1], speed=1), row(IPS[2], speed=1)]
         self.run_step("compare")
         self.assertEqual(self.status.snapshot()["phase"], "degraded")
         with self.assertRaises(auto.ServiceError):
