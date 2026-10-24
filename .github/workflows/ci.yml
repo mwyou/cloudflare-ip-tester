@@ -49,11 +49,11 @@ jobs:
         env:
           CF_DOMAIN: ci.example.com
           CF_API_TOKEN: ci-placeholder
-          CFIP_IMAGE: example/cloudflare-ip-tester:ci
         run: |
           cp .env.example .env
           docker compose config --quiet
           docker compose -f compose.hub.yaml config --quiet
+          docker compose -f compose.yaml -f compose.build.yaml config --quiet
 
   containers:
     runs-on: ubuntu-24.04

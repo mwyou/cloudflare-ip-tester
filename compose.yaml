@@ -1,7 +1,6 @@
 services:
   cfst-dns:
-    build: .
-    image: cfipdesk-cfst:3.1
+    image: "${CFIP_IMAGE:-cotelforce/cloudflare-ip-tester:3.1.0}"
     restart: unless-stopped
     init: true
     stop_grace_period: 30s
@@ -30,7 +29,7 @@ services:
         max-size: "10m"
         max-file: "3"
   cfst-tools:
-    image: cfipdesk-cfst:3.1
+    image: "${CFIP_IMAGE:-cotelforce/cloudflare-ip-tester:3.1.0}"
     profiles: ["tools"]
     command: ["status"]
     environment:

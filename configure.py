@@ -28,7 +28,7 @@ def main():
     handle = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as stream:
         stream.write(text)
-    print("已创建 .env。运行 docker compose up -d --build 启动自动优选。")
+    print("已创建 .env。运行 docker compose up -d 启动自动优选。")
 
 
 if __name__ == "__main__":

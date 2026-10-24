@@ -4,7 +4,7 @@
 
 CFST 二进制保存在独立的 `cfst-bin` 数据卷，初始版本 v2.3.5；支持指定版本独立升级、校验和回滚，重建网站镜像会保留卷内已选定版本。命令见 [CFST 独立升级与回滚](DOCKER.md#cfst-独立升级与回滚)。
 
-GitHub 自动测试、Docker Hub 双架构镜像发布及拉取部署，见 [PUBLISH.md](PUBLISH.md)。源码构建使用 `compose.yaml`；发布镜像部署使用 `compose.hub.yaml`。
+默认使用 Docker Hub 镜像 `cotelforce/cloudflare-ip-tester:3.1.0`。配置 `.env` 中的域名和 Token 后，执行 `docker compose up -d` 即可部署；可用 `CFIP_IMAGE` 指定其他镜像版本。需要源码构建时使用 `docker compose -f compose.yaml -f compose.build.yaml up -d --build`。GitHub 自动测试及 Docker Hub 双架构镜像发布见 [PUBLISH.md](PUBLISH.md)。
 
 本地运行的中文测速网站。读取 Cloudflare 控制台中指定域名的 A / AAAA 记录，勾选候选 IP，逐个下载测速，实时查看进度并导出结果。使用 Python 标准库和原生 HTML/CSS/JS，无第三方依赖、数据库或付费接口。
 

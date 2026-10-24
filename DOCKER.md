@@ -2,7 +2,7 @@
 
 部署机器需安装 Docker Engine / Docker Desktop 和 Compose v2。支持 Linux amd64、arm64 容器，Windows 使用 Linux containers。
 
-本文说明从源码构建部署。使用 Docker Hub 现成镜像时，请按 [PUBLISH.md](PUBLISH.md#使用发布镜像部署) 操作，无需在服务器构建。
+默认从 Docker Hub 拉取 `cotelforce/cloudflare-ip-tester:3.1.0`，支持 Linux amd64、arm64。可在 `.env` 设置 `CFIP_IMAGE` 指定其他版本；默认部署无需本机构建。
 
 ## 配置并启动
 
@@ -36,7 +36,8 @@ Token 的资源范围限制到该域名所属 Zone，授予：
 启动：
 
 ```sh
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 docker compose logs -f --tail=100
 ```
 
@@ -124,7 +125,7 @@ docker compose down
 
 此功能升级的是 **CFST 二进制本身**。CFST 放在独立的 `cfst-bin` 命名卷，容器内路径为 `/opt/cfst`；`releases/` 保留各版本文件和校验信息，`current.json` 记录当前版本与上一个版本。首次启动从镜像自带的官方 v2.3.5 初始化。之后重启、重新创建容器、重建网站镜像都不会覆盖已选定的 CFST 版本。启动时检查当前二进制的 SHA-256 和架构，再将实际路径及版本传给自动测速进程。
 
-从旧部署迁移，只需替换项目文件，然后运行一次 `docker compose up -d --build`，会创建新的二进制卷并初始化；已有 `cfst-data` 状态卷继续使用。维护工具与主服务使用同一镜像，工具容器不加载 Cloudflare Token。
+从旧部署迁移，替换项目文件后运行 `docker compose pull` 和 `docker compose up -d`，保持相同部署目录、Compose 项目名、`.env` 及数据卷，继续使用已有 `cfst-data` 和 `cfst-bin`。没有二进制卷时会创建并初始化。维护工具与主服务使用同一镜像，工具容器不加载 Cloudflare Token。
 
 查看当前版本、上一个版本和二进制 SHA-256（服务运行中也可查看）：
 
@@ -157,7 +158,7 @@ docker compose up -d cfst-dns
 在第一次允许写 DNS 前，可以演练一轮（仍会调用真实 Cloudflare API 并下载测速）：
 
 ```sh
-docker compose build
+docker compose pull
 docker compose run --rm --no-deps cfst-dns --once --dry-run
 ```
 
@@ -166,6 +167,16 @@ docker compose run --rm --no-deps cfst-dns --once --dry-run
 不配置凭据也可在本机预览页面：`python automation.py --dashboard-only --port 8790`。此模式显示“预览模式”，五个按钮禁用，不会调用 Cloudflare、运行 CFST 或写 DNS；使用独立端口，避免占用 Docker 的 8789。
 
 预览默认显示“未配置”，也可通过进程环境变量 `CF_DOMAIN` 指定预览域名；预览命令不会自行读取 `.env`。Docker 正常运行时由 Compose 加载 `.env` 中的配置。
+
+## 源码构建
+
+开发或修改程序时，可以叠加源码构建配置：
+
+```sh
+docker compose -f compose.yaml -f compose.build.yaml up -d --build
+```
+
+这一配置将主服务和 CFST 维护工具都切换到本地镜像 `cfipdesk-cfst:3.1`。后续查看状态、执行演练、升级 CFST 等操作也使用同样的 `-f compose.yaml -f compose.build.yaml` 参数。现有的 `compose.hub.yaml` 保留兼容，与默认配置使用相同的 Docker Hub 镜像及数据卷。
 
 离线测试：
 

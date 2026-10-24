@@ -1,7 +1,7 @@
-# Published-image deployment. Set CFIP_IMAGE in .env to namespace/repository:version.
+# Compatibility file for existing deployments. compose.yaml also uses Docker Hub by default.
 services:
   cfst-dns:
-    image: "${CFIP_IMAGE:?请先在 .env 填写 Docker Hub 镜像 CFIP_IMAGE}"
+    image: "${CFIP_IMAGE:-cotelforce/cloudflare-ip-tester:3.1.0}"
     restart: unless-stopped
     init: true
     stop_grace_period: 30s
@@ -30,7 +30,7 @@ services:
         max-size: "10m"
         max-file: "3"
   cfst-tools:
-    image: "${CFIP_IMAGE:?请先在 .env 填写 Docker Hub 镜像 CFIP_IMAGE}"
+    image: "${CFIP_IMAGE:-cotelforce/cloudflare-ip-tester:3.1.0}"
     profiles: ["tools"]
     command: ["status"]
     environment:
