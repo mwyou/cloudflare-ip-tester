@@ -32,7 +32,7 @@ header h1{margin:0;font-size:19px;font-weight:600}
 .panel h2{font-size:15px;font-weight:600;margin:0}
 .pill{white-space:nowrap;font-size:11px;color:var(--muted);padding:2px 7px;border:1px solid var(--line);border-radius:5px}
 .dns-list{display:grid;gap:9px;min-height:64px}
-.dns-item{font-family:Consolas,monospace;border:1px solid #314452;border-radius:7px;padding:10px 12px;overflow-wrap:anywhere}
+.dns-item{font:14px/1.65 Consolas,monospace;color:var(--text);border:1px solid #314452;border-radius:7px;padding:10px 12px;overflow-wrap:anywhere}
 .hint{font-size:12px;color:var(--muted);margin:16px 0 0}
 .muted{color:var(--muted)}
 .table-wrap{overflow:visible}
@@ -57,6 +57,7 @@ td small{display:block;color:var(--muted);font:11px "Segoe UI",sans-serif}
 tr.selected{background:#74dfb910}
 .dns-change{margin-top:18px;padding-top:14px;border-top:1px solid var(--line);font-size:12px;line-height:1.8}
 .dns-change strong{color:var(--mint);font-weight:500}
+.dns-change-label{margin:12px 0 8px}
 .cfst-controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .cfst-controls label{font-size:12px;color:var(--muted)}
 .cfst-controls select{min-width:180px;flex:1;padding:12px;color:var(--text);background:var(--bg);border:1px solid #496574;border-radius:7px;font:inherit}

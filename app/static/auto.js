@@ -10,6 +10,9 @@ let cfstData;
 let cfstMessage = '';
 let cfstOptions = '';
 let intervalMessage = '';
+function dnsItems(ips) {
+  return ips?.length ? ips.map(ip => `<div class="dns-item">${esc(ip)}</div>`).join('') : '<p class="muted">暂无记录</p>';
+}
 function disableActions() { document.querySelectorAll('[data-action],.cfst-controls button,.cfst-controls select,.interval-controls button,.interval-controls input').forEach(button => { button.disabled = true; }); }
 function renderResultRows(selector, rows, ranked) {
   const body = $(selector);
@@ -84,10 +87,10 @@ async function refresh() {
     });
     $('#proposal').hidden = !data.proposed_ips?.length;
     $('#proposal').textContent = data.proposed_ips?.length ? `待写入：${data.proposed_ips.join('、')}` : '';
-    $('#dns').innerHTML = data.dns_ips.length ? data.dns_ips.map(ip => `<div class="dns-item">${esc(ip)}</div>`).join('') : '<p class="muted">暂无记录</p>';
+    $('#dns').innerHTML = dnsItems(data.dns_ips);
     $('#updated').textContent = data.last_dns_update ? `更新于 ${date(data.last_dns_update)}` : '尚未更新';
     const change = data.dns_change;
-    $('#dns-change').innerHTML = change ? `<strong>上次变更</strong><br>之前：${esc((change.before || []).join('、') || '无')}<br>之后：${esc((change.after || []).join('、') || '无')}<br><span class="muted">${esc(date(change.time))}</span>` : '暂无变更对比';
+    $('#dns-change').innerHTML = change ? `<strong>上次变更</strong><p class="dns-change-label">之前</p><div class="dns-list">${dnsItems(change.before)}</div><p class="dns-change-label">之后</p><div class="dns-list">${dnsItems(change.after)}</div><p class="hint">${esc(date(change.time))}</p>` : '暂无变更对比';
     renderResultRows('#check-rows', data.check_results, false);
     // Use the DNS snapshot from selection time: writing the winners into DNS
     // must not make those new results disappear from the completed run.
