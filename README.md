@@ -40,7 +40,7 @@ Compose 只运行一个服务。网站镜像版本在 `image` 中修改，CFST �
 
 默认从 Cloudflare 网段均衡抽样 128 个候选，初选最多下载测试 20 个；最终合并阶段复测全部通过延迟筛选的新旧候选。测速使用部署机器的出口，真实下载会消耗流量。CFST CSV 的速度按 MiB/s 换算为 Mbps 后比较。
 
-默认参数已经内置：延迟 100 ms、带宽 30 Mbps、每小时检查、128 个候选、下载测试 20 个、单 IP 10 秒。需要调整时，在 Compose 的 `environment` 中添加 `MAX_LATENCY_MS`、`MIN_BANDWIDTH_MBPS`、`CHECK_INTERVAL_SECONDS`、`CANDIDATE_COUNT`、`DOWNLOAD_COUNT` 或 `DOWNLOAD_SECONDS`，数值使用带引号的字符串。
+默认参数已经内置：延迟 100 ms、带宽 30 Mbps、每小时检查、128 个候选、下载测试 20 个、单 IP 10 秒，测速地址为 CFST 官方默认的 `https://cf.xiu2.xyz/url`。需要调整时，在 Compose 的 `environment` 中添加 `MAX_LATENCY_MS`、`MIN_BANDWIDTH_MBPS`、`CHECK_INTERVAL_SECONDS`、`CANDIDATE_COUNT`、`DOWNLOAD_COUNT`、`DOWNLOAD_SECONDS` 或 `CFST_URL`，数值使用带引号的字符串。
 
 需要自定义候选时，创建 `config/candidates.txt`，每行一个 Cloudflare IP，在 `environment` 添加 `CANDIDATE_FILE: "/config/candidates.txt"`，在 `volumes` 添加 `./config:/config:ro`。候选为 3～512 个去重 IP，不接受 CIDR。
 

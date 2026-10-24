@@ -64,7 +64,7 @@ class Settings:
     download_count: int = 20
     download_seconds: int = 10
     threads: int = 8
-    test_url: str = "https://speed.cloudflare.com/__down?bytes=200000000"
+    test_url: str = "https://cf.xiu2.xyz/url"
     binary: str = "/usr/local/bin/cfst"
     candidate_file: str = ""
     data_dir: Path = Path("/data")
