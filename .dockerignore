@@ -1,0 +1,15 @@
+.env
+.env.*
+!.env.example
+.git
+.github
+ci
+.venv
+__pycache__
+*.pyc
+*.log
+qa
+data
+config
+test_*.py
+*.zip

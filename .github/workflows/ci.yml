@@ -1,0 +1,93 @@
+name: Test and build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22'
+      - name: Fetch verified official CFST for contract tests
+        env:
+          CFST_TEST_BIN: ${{ runner.temp }}/cfst-check/cfst
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          from cfst_manager import VERSION, HASHES, download_release, native_arch
+          arch = native_arch()
+          binary, _ = download_release(VERSION, arch, HASHES[arch])
+          path = Path(os.environ['CFST_TEST_BIN'])
+          path.parent.mkdir(parents=True, exist_ok=True)
+          path.write_bytes(binary)
+          path.chmod(0o755)
+          PY
+      - name: Python and real CFST contract tests
+        env:
+          CFST_TEST_BIN: ${{ runner.temp }}/cfst-check/cfst
+        run: python -m unittest -v test_automation.py test_cfst_manager.py test_app.py
+      - name: JavaScript syntax
+        run: |
+          node --check static/auto.js
+          node --check static/app.js
+      - name: Compose configuration
+        env:
+          CF_DOMAIN: ci.example.com
+          CF_API_TOKEN: ci-placeholder
+          CFIP_IMAGE: example/cloudflare-ip-tester:ci
+        run: |
+          cp .env.example .env
+          docker compose config --quiet
+          docker compose -f compose.hub.yaml config --quiet
+
+  containers:
+    runs-on: ubuntu-24.04
+    needs: tests
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
+        with:
+          platforms: arm64
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - name: Build test image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          platforms: linux/${{ matrix.arch }}
+          load: true
+          tags: cfipdesk-ci:${{ matrix.arch }}
+          cache-from: type=gha,scope=ci-${{ matrix.arch }}
+          cache-to: type=gha,scope=ci-${{ matrix.arch }},mode=max
+      - name: Check Linux CFST and volume persistence across containers
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          volume="cfst-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ARCH}"
+          docker volume create "$volume"
+          for mode in init existing; do
+            docker run --rm --platform "linux/$ARCH" --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+              --tmpfs /tmp:size=32m,mode=1777 --volume "$volume:/opt/cfst" \
+              --volume "$GITHUB_WORKSPACE/ci/container_smoke.py:/checks/container_smoke.py:ro" \
+              --entrypoint python "cfipdesk-ci:$ARCH" /checks/container_smoke.py "$mode" "$ARCH"
+          done
+          docker volume rm "$volume"

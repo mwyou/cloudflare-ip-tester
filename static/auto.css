@@ -1,0 +1,53 @@
+:root{color-scheme:dark;--bg:#0b111b;--panel:#131e2c;--line:#293748;--text:#ecf3fb;--muted:#8fa2b7;--mint:#74dfb9;--orange:#ffb878}
+*{box-sizing:border-box}
+body{margin:0;font:14px/1.65 "Segoe UI","Microsoft YaHei",sans-serif;color:var(--text);background:var(--bg)}
+.workspace{max-width:1440px;padding:0 32px 32px;margin:auto}
+header{padding:23px 0;margin-bottom:22px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;gap:16px}
+header h1{margin:0;font-size:19px;font-weight:600}
+.brand{color:var(--text);text-decoration:none}
+.connection{color:var(--muted);font-size:12px;white-space:nowrap}
+.connection:before{content:'●';color:var(--mint);margin-right:7px}
+.notice{padding:12px 16px;border:1px solid #34564f;border-radius:9px;background:#1d3f352d;color:#b6e4d4;margin-bottom:18px}
+.notice.error{color:#ffd3ac;background:#49301c33;border-color:#6c4c30}
+.metrics{display:grid;grid-template-columns:1.35fr 1fr 1.1fr 1fr;gap:14px;margin-bottom:20px}
+.metrics article,.panel{border:1px solid var(--line);border-radius:10px;background:var(--panel)}
+.metrics article{padding:18px;overflow-wrap:anywhere}
+.metrics p{color:var(--muted);font-size:12px;margin:0 0 10px}
+.metrics strong{font-size:21px;font-weight:600;line-height:1.4;display:block}
+.metrics small{display:block;font-size:12px;color:var(--muted);margin-top:8px}
+.featured strong{color:var(--mint)}
+.steps{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:14px;margin-bottom:20px}
+.steps>div{min-width:0}
+.steps button{width:100%;padding:11px 8px;color:var(--text);background:var(--panel);border:1px solid #496574;border-radius:7px;font:inherit;cursor:pointer}
+.steps button:hover:enabled{background:#203849;border-color:var(--mint)}
+.steps button:focus-visible{outline:2px solid var(--mint);outline-offset:3px}
+.steps button:disabled{cursor:default;opacity:.45}
+.steps button.running{opacity:1;border-color:var(--mint);color:var(--mint)}
+.steps small{display:block;font-size:11px;line-height:1.5;color:var(--muted);padding:7px 2px 0;overflow-wrap:anywhere}
+.proposal{font-size:12px;line-height:1.8;color:var(--mint);overflow-wrap:anywhere;margin:0 0 12px}
+.main-grid{display:grid;grid-template-columns:300px minmax(0,1fr);gap:20px}
+.panel{min-width:0;padding:20px}
+.panel-title{display:flex;justify-content:space-between;align-items:center;gap:14px;margin-bottom:15px}
+.panel h2{font-size:15px;font-weight:600;margin:0}
+.pill{white-space:nowrap;font-size:11px;color:var(--muted);padding:2px 7px;border:1px solid var(--line);border-radius:5px}
+.dns-list{display:grid;gap:9px;min-height:64px}
+.dns-item{font-family:Consolas,monospace;border:1px solid #314452;border-radius:7px;padding:10px 12px;overflow-wrap:anywhere}
+.hint{font-size:12px;color:var(--muted);margin:16px 0 0}
+.muted{color:var(--muted)}
+.table-wrap{overflow-x:auto}
+table{width:100%;border-collapse:collapse;text-align:left;white-space:nowrap}
+th{font-size:12px;color:var(--muted);font-weight:400;padding:8px 12px;border-bottom:1px solid var(--line)}
+td{padding:13px 12px;border-bottom:1px solid #263446;font-size:13px}
+td:first-child{font-family:Consolas,monospace}
+td small{display:block;color:var(--muted);font:11px "Segoe UI",sans-serif}
+.good{color:var(--mint)}
+.bad{color:var(--orange)}
+.empty{text-align:center;color:var(--muted);padding:32px 0}
+.history{margin-top:20px;padding:0 20px}
+.history summary{padding:16px 0;font-size:14px;cursor:pointer}
+.history summary:focus-visible{outline:2px solid var(--mint);outline-offset:3px}
+.history ol{list-style:none;margin:0;padding:0 0 12px}
+.history li{padding:9px 0;border-top:1px solid #263446;display:flex;gap:20px;font-size:12px}
+.history time{color:var(--muted);min-width:145px}
+@media(max-width:1050px){.metrics{grid-template-columns:1fr 1fr}.main-grid{grid-template-columns:260px minmax(0,1fr)}}
+@media(max-width:760px){.workspace{padding:0 16px 24px}.main-grid{grid-template-columns:1fr}.metrics{gap:10px}.metrics article{padding:15px}.metrics strong{font-size:19px}.steps{grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.panel{padding:16px}.history{padding:0 16px}.history li{display:block}.history time{display:block}header h1{font-size:17px}.connection{font-size:11px}}

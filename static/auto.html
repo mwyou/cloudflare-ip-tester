@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Cloudflare IP 自动优选</title><link rel="stylesheet" href="/auto.css"><script src="/auto.js" defer></script></head>
+<body><div class="workspace">
+<header><h1><a href="/" class="brand">Cloudflare IP 自动优选</a></h1><span class="connection" id="connection">连接中</span></header>
+<div class="notice" role="status" id="notice">正在读取任务状态…</div>
+<section class="metrics" aria-label="任务概览">
+<article><p>域名</p><strong id="domain">—</strong><small id="kind">—</small></article>
+<article><p>检测标准</p><strong id="threshold">≤ 100 ms</strong><small id="bandwidth">&gt; 30 Mbps</small></article>
+<article><p>下一次检查</p><strong id="next">—</strong><small id="last">等待首次运行</small></article>
+<article class="featured"><p>运行状态</p><strong id="phase">连接中</strong></article>
+</section>
+<section class="steps" aria-label="单步操作">
+<div><button type="button" data-action="read" disabled>读取 DNS</button><small id="step-read">等待连接</small></div>
+<div><button type="button" data-action="check" disabled>检测当前 IP</button><small id="step-check">等待连接</small></div>
+<div><button type="button" data-action="select" disabled>优选新 IP</button><small id="step-select">等待连接</small></div>
+<div><button type="button" data-action="compare" disabled>合并复测</button><small id="step-compare">等待连接</small></div>
+<div><button type="button" data-action="write" disabled>写入 DNS</button><small id="step-write">等待连接</small></div>
+</section>
+<div class="main-grid"><section class="panel"><div class="panel-title"><h2>DNS 记录</h2><span class="pill">灰云</span></div><div id="dns" class="dns-list"><p class="muted">暂无记录</p></div><p class="hint" id="updated">尚未更新</p></section>
+<section class="panel"><div class="panel-title"><h2>测速结果</h2></div><p class="proposal" id="proposal" hidden></p><div class="table-wrap"><table><thead><tr><th>IP / 地区</th><th>TCP 延迟</th><th>下载带宽 ↓</th><th>状态</th></tr></thead><tbody id="rows"><tr><td colspan="4" class="empty">暂无测速结果</td></tr></tbody></table></div></section></div>
+<details class="panel history"><summary>运行记录</summary><ol id="events"><li class="muted">暂无记录</li></ol></details>
+</div></body></html>
