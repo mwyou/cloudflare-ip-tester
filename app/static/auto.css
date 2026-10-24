@@ -44,7 +44,7 @@ td small{display:block;color:var(--muted);font:11px "Segoe UI",sans-serif}
 .good{color:var(--mint)}
 .bad{color:var(--orange)}
 .cfst-panel{margin-top:20px}
-.interval-panel{margin-top:20px}
+.interval-panel{margin:20px 0}
 .interval-controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .interval-controls input{width:110px;padding:11px;color:var(--text);background:var(--bg);border:1px solid #496574;border-radius:7px;font:inherit}
 .interval-controls button{padding:11px 14px;color:var(--text);background:var(--panel);border:1px solid #496574;border-radius:7px;font:inherit;cursor:pointer}
@@ -53,6 +53,9 @@ td small{display:block;color:var(--muted);font:11px "Segoe UI",sans-serif}
 .results-panel h3{margin:20px 0 8px;font-size:13px;color:var(--muted)}
 .results-panel h3:first-of-type{margin-top:4px}
 .results-panel h3 small{font-size:11px;font-weight:400}
+.results-panel .table-wrap{max-height:450px;overflow:auto}
+.results-panel th{position:sticky;top:0;background:var(--panel)}
+tr.selected{background:#74dfb910}
 .dns-change{margin-top:18px;padding-top:14px;border-top:1px solid var(--line);font-size:12px;line-height:1.8}
 .dns-change strong{color:var(--mint);font-weight:500}
 .cfst-controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap}

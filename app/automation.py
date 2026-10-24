@@ -345,6 +345,7 @@ class Status:
                      "last_run": None, "next_run": None, "last_dns_update": None,
                      "dns_ips": [], "previous_dns_ips": [], "dns_change": None,
                      "results": [], "check_results": [], "selection_results": [], "ranked_results": [],
+                     "check_time": None, "selection_time": None, "ranked_time": None,
                      "events": [], "steps": {}, "proposed_ips": [],
                      "manual_enabled": False, "busy": False, "active_action": None}
         if path and path.is_file():
@@ -352,7 +353,8 @@ class Status:
                 previous = json.loads(path.read_text(encoding="utf-8"))
                 if previous.get("domain") == settings.domain and previous.get("record_type") == settings.kind:
                     for key in ("events", "last_dns_update", "results", "check_results", "selection_results",
-                                "ranked_results", "dns_ips", "previous_dns_ips", "dns_change"):
+                                "ranked_results", "check_time", "selection_time", "ranked_time",
+                                "dns_ips", "previous_dns_ips", "dns_change"):
                         self.data[key] = previous.get(key, self.data[key])
             except (ValueError, OSError):
                 pass
@@ -427,7 +429,7 @@ class Maintainer:
         steps = self.status.snapshot()["steps"]
         for key in ("compare", "write"):
             steps.pop(key, None)
-        self.status.update(proposed_ips=[], ranked_results=[], results=[], steps=steps)
+        self.status.update(proposed_ips=[], steps=steps)
 
     def complete(self, action, count):
         steps = self.status.snapshot()["steps"]
@@ -439,7 +441,7 @@ class Maintainer:
         self.check_rows, self.selection_rows, self.new_top = None, None, None
         self.invalidate_final()
         steps = self.status.snapshot()["steps"]
-        for key in ("read", "check"):
+        for key in ACTIONS:
             steps.pop(key, None)
         self.status.update(phase="reading", steps=steps, message="正在读取 DNS")
         records = self.client.records()
@@ -448,25 +450,29 @@ class Maintainer:
         self.records, self.read_at = records, time.time()
         ips = list(dict.fromkeys(r["content"] for r in records if r.get("type") == self.cfg.kind))
         self.complete("read", len(ips))
-        self.status.update(phase="read_done", dns_ips=ips, check_results=[], selection_results=[],
-                           ranked_results=[], results=[], message=f"已读取 {len(ips)} 个 DNS IP")
+        self.status.update(phase="read_done", dns_ips=ips, message=f"已读取 {len(ips)} 个 DNS IP")
         return ips
 
     def check(self):
         self.require_action("check")
+        self.check_rows = None
         self.invalidate_final()
         steps = self.status.snapshot()["steps"]
         steps.pop("check", None)
         self.status.update(phase="checking", steps=steps, message="正在检测当前 IP")
         ips = self.valid_ips()
         rows = self.runner.run(ips, len(ips))
+        measured = {row["ip"] for row in rows}
+        rows += [{"ip": ip, "speed_mibps": 0, "bandwidth_mbps": 0, "latency_ms": self.cfg.latency_ms + 1,
+                  "sent": 0, "received": 0, "loss": 1, "colo": "", "measured": False}
+                 for ip in ips if ip not in measured]
         self.check_rows = rows
         good = sum(qualifies(self.cfg, row) for row in rows)
         managed = [r for r in self.records if r.get("type") == self.cfg.kind]
         healthy = (len(managed) == len(ips) == len(rows) == good == 3 and
                    {r["ip"] for r in rows} == set(ips) and not any(r.get("proxied") for r in managed))
         self.complete("check", good)
-        self.status.update(results=rows, check_results=rows, ranked_results=[], phase="healthy" if healthy else "check_done",
+        self.status.update(results=rows, check_results=rows, check_time=time.time(), phase="healthy" if healthy else "check_done",
                            message="三个 IP 均达标，保持现有 DNS" if healthy else f"检测完成：{good} / {len(ips)} 个 IP 达标")
         return healthy
 
@@ -483,7 +489,7 @@ class Maintainer:
         self.selection_rows = rows
         self.new_top, self.selected_at = self.top(rows), time.time()
         self.complete("select", len(self.new_top))
-        self.status.update(results=rows, selection_results=rows, ranked_results=[], phase="select_done",
+        self.status.update(results=rows, selection_results=rows, selection_time=time.time(), phase="select_done",
                            message=f"优选完成：取得 {len(self.new_top)} 个达标候选")
         return rows
 
@@ -491,9 +497,9 @@ class Maintainer:
         return sorted((r for r in rows if qualifies(self.cfg, r)),
                       key=lambda r: (-r["speed_mibps"], r["latency_ms"]))[:3]
 
-    def compare(self, bootstrap_rows=None):
+    def compare(self):
         self.require_action("compare")
-        self.final, self.compared_at, self.ranked = [], 0, []
+        self.invalidate_final()
         old = [{**row, "source": "当前检测"} for row in (self.check_rows or [])]
         new = [{**row, "source": "新 IP 优选"} for row in (self.new_top or [])]
         ranked = sorted(old + new, key=lambda r: (-r["speed_mibps"], r["latency_ms"]))
@@ -506,11 +512,13 @@ class Maintainer:
                 good.append(row)
         self.complete("compare", len(good))
         if len(good) < 3:
-            self.status.update(results=ranked, ranked_results=ranked, phase="degraded",
+            self.status.update(results=ranked, ranked_results=ranked, ranked_time=time.time(), phase="degraded",
                                message=f"六个结果排序后仅找到 {len(good)} 个达标 IP；保留现有 DNS")
             return False
         self.final, self.compared_at = good[:3], time.time()
-        self.status.update(results=ranked, ranked_results=ranked, proposed_ips=[r["ip"] for r in self.final],
+        for row in self.final:
+            row["selected"] = True
+        self.status.update(results=ranked, ranked_results=ranked, ranked_time=time.time(), proposed_ips=[r["ip"] for r in self.final],
                            phase="compare_done", message="六个结果已排序，前三名待写入")
         return True
 
@@ -532,9 +540,10 @@ class Maintainer:
         self.complete("write", 3)
         now = time.time()
         old_ips = list(dict.fromkeys(r.get("content") for r in before if r.get("type") == self.cfg.kind))
-        self.status.update(phase="updated", previous_dns_ips=old_ips,
-                           dns_change={"before": old_ips, "after": selected, "time": now},
-                           dns_ips=selected, last_dns_update=now, message="已写入并核验三个 IP")
+        changes = {"previous_dns_ips": old_ips,
+                   "dns_change": {"before": old_ips, "after": selected, "time": now}} if set(old_ips) != set(selected) else {}
+        self.status.update(phase="updated", dns_ips=selected, last_dns_update=now,
+                           message="已写入并核验三个 IP", **changes)
 
     def cycle(self, initial=False):
         self.new_top, self.selected_at = None, 0
@@ -543,11 +552,11 @@ class Maintainer:
         managed = [r for r in self.records if r.get("type") == self.cfg.kind]
         current_dns_ready = (len(managed) == len(ips) == 3 and all(
                 is_cloudflare_ip(ip) for ip in ips) and not any(r.get("proxied") for r in managed))
-        if current_dns_ready:
+        if self.valid_ips():
             healthy = self.check()
-            if healthy and not (initial and self.cfg.initial_select):
+            if current_dns_ready and healthy and not (initial and self.cfg.initial_select):
                 return
-        rows = self.select()
+        self.select()
         if self.compare():
             self.write()
 
@@ -588,7 +597,8 @@ class TaskController:
     def __init__(self, service, cfst=None, scheduler_wakeup=None):
         self.service = service
         self.cfst = cfst
-        self.scheduler_wakeup = scheduler_wakeup
+        self.scheduler_wakeup = scheduler_wakeup if scheduler_wakeup is not None else threading.Event()
+        self.next_check = None
         self.lock = threading.Lock()
         self.worker = None
         service.status.update(manual_enabled=True)
@@ -611,6 +621,7 @@ class TaskController:
                 self.service.records, self.service.read_at = None, 0
                 self.service.new_top, self.service.selected_at = None, 0
                 self.service.final, self.service.compared_at = [], 0
+                self.service.check_rows, self.service.selection_rows, self.service.ranked = None, None, []
                 self.service.status.update(engine="CFST " + metadata["version"], phase="cfst_ready",
                                            results=[], steps={}, proposed_ips=[],
                                            cfst_message=f"已启用 {metadata['version']}",
@@ -690,10 +701,23 @@ class TaskController:
             self.service.runner.settings = self.service.cfg
             self.service.status.update(interval_seconds=seconds, next_run=time.time() + seconds,
                                        message=f"检查间隔已改为 {seconds // 60} 分钟")
-            if self.scheduler_wakeup:
-                self.scheduler_wakeup.set()
+            self.next_check = time.monotonic() + seconds
+            self.scheduler_wakeup.set()
         finally:
             self.lock.release()
+
+    def wait_next(self, delay):
+        with self.lock:
+            if not self.scheduler_wakeup.is_set():
+                self.next_check = time.monotonic() + delay
+                self.service.status.update(next_run=time.time() + delay)
+        while not self.service.stop.is_set():
+            with self.lock:
+                self.scheduler_wakeup.clear()
+                remaining = self.next_check - time.monotonic()
+            if remaining <= 0:
+                return
+            self.scheduler_wakeup.wait(min(remaining, 0.5))
 
 
 def make_dashboard(status, controller=None):
@@ -904,9 +928,7 @@ def main():
                 break
             elapsed = time.monotonic() - start
             delay = service.cfg.interval - elapsed if elapsed < service.cfg.interval else service.cfg.interval
-            status.update(next_run=time.time() + delay)
-            scheduler_wakeup.wait(delay)
-            scheduler_wakeup.clear()
+            controller.wait_next(delay)
     finally:
         stop.set()
         if server:

@@ -13,7 +13,7 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import Mock, call, patch
+from unittest.mock import Mock, patch
 
 import automation as auto
 
@@ -107,7 +107,7 @@ class AutomationTests(unittest.TestCase):
         self.assertEqual(snapshot["dns_change"]["after"], [NEW[1], IPS[1], IPS[2]])
 
     def test_initial_start_selects_even_if_old_dns_is_healthy(self):
-        self.runner.run.return_value = [row(ip, speed=8) for ip in NEW]
+        self.runner.run.side_effect = [[row(ip) for ip in IPS], [row(ip, speed=8) for ip in NEW]]
         with patch.object(auto, "candidate_pool", return_value=NEW):
             self.service.cycle(initial=True)
         self.assertEqual([call.args for call in self.runner.run.call_args_list], [(IPS, 3), (NEW, 20)])
@@ -120,7 +120,7 @@ class AutomationTests(unittest.TestCase):
             self.service.cycle()
         self.client.replace.assert_called_once_with([], NEW)
 
-    def test_insufficient_qualifying_ips_preserves_dns_without_retry(self):
+    def test_healthy_old_results_are_usable_when_new_candidates_are_insufficient(self):
         self.runner.run.side_effect = [[row(ip) for ip in IPS], [row(NEW[0]), row(NEW[1]), row(NEW[2], speed=1)]]
         with patch.object(auto, "candidate_pool", return_value=NEW):
             self.service.cycle(initial=True)
@@ -128,7 +128,7 @@ class AutomationTests(unittest.TestCase):
         self.client.replace.assert_called_once_with(records(), [IPS[0], IPS[1], IPS[2]])
         self.assertEqual(self.status.snapshot()["phase"], "updated")
 
-    def test_overlapping_old_and_new_ips_are_retested_once(self):
+    def test_overlapping_ips_keep_both_samples_but_write_unique_ips(self):
         initial = [row(IPS[0], speed=10), row(IPS[1], speed=8), row(IPS[2], speed=6)]
         selected = [row(IPS[0], speed=4), row(NEW[0], speed=8), row(NEW[1], speed=6)]
         self.runner.run.side_effect = [initial, selected]
@@ -145,7 +145,7 @@ class AutomationTests(unittest.TestCase):
         self.assertEqual([call.args for call in self.runner.run.call_args_list], [(IPS, 3), (NEW, 20)])
         self.client.replace.assert_called_once_with(records(), [NEW[0], IPS[0], IPS[1]])
 
-    def test_final_ranking_does_not_reuse_fast_preliminary_samples(self):
+    def test_insufficient_combined_qualifiers_preserve_dns(self):
         self.runner.run.side_effect = [[row(ip, latency=110) for ip in IPS],
                                       [row(ip, speed=1) for ip in NEW]]
         with patch.object(auto, "candidate_pool", return_value=NEW):
@@ -154,7 +154,7 @@ class AutomationTests(unittest.TestCase):
         self.assertEqual(self.status.snapshot()["phase"], "degraded")
         self.assertTrue(all(r["speed_mibps"] == 1 for r in self.status.snapshot()["selection_results"]))
 
-    def test_rate_limit_during_combined_retest_preserves_dns(self):
+    def test_rate_limit_during_selection_preserves_dns(self):
         self.runner.run.side_effect = [[row(ip) for ip in IPS], auto.RateLimited("429")]
         with patch.object(auto, "candidate_pool", return_value=NEW), self.assertRaises(auto.RateLimited):
             self.service.cycle(initial=True)
@@ -324,7 +324,7 @@ class ManualSteps(unittest.TestCase):
         self.client = Mock()
         self.client.records.return_value = records()
         self.runner = Mock()
-        self.runner.run.return_value = [row(ip) for ip in NEW]
+        self.runner.run.return_value = [row(ip, speed=8) for ip in NEW]
         self.stop = threading.Event()
         self.service = auto.Maintainer(self.cfg, self.client, self.runner, self.status, self.stop)
         self.controller = auto.TaskController(self.service)
@@ -338,7 +338,10 @@ class ManualSteps(unittest.TestCase):
     def prepare_final(self):
         self.run_step("read")
         if self.service.valid_ips():
+            previous = self.runner.run.return_value
+            self.runner.run.return_value = [row(ip) for ip in IPS]
             self.run_step("check")
+            self.runner.run.return_value = previous
         with patch.object(auto, "candidate_pool", return_value=NEW):
             self.run_step("select")
         self.run_step("compare")

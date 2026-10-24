@@ -9,7 +9,8 @@ let timer;
 let cfstData;
 let cfstMessage = '';
 let cfstOptions = '';
-function disableActions() { document.querySelectorAll('[data-action],.cfst-controls button,.cfst-controls select').forEach(button => { button.disabled = true; }); }
+let intervalMessage = '';
+function disableActions() { document.querySelectorAll('[data-action],.cfst-controls button,.cfst-controls select,.interval-controls button,.interval-controls input').forEach(button => { button.disabled = true; }); }
 function renderResultRows(selector, rows, ranked) {
   const body = $(selector);
   if (!rows?.length) {
@@ -19,7 +20,7 @@ function renderResultRows(selector, rows, ranked) {
   body.innerHTML = rows.map(row => {
     const good = row.latency_ms <= currentStatus.max_latency_ms && row.bandwidth_mbps > currentStatus.min_bandwidth_mbps;
     const source = ranked ? `<td>${esc(row.source || '—')}</td>` : '';
-    return `<tr>${source}<td>${esc(row.ip)}<small>${esc(row.colo || '—')}</small></td><td>${Number(row.latency_ms).toFixed(2)} ms</td><td>${Number(row.bandwidth_mbps).toFixed(2)} Mbps</td><td class="${good?'good':'bad'}">${good?'达标':row.speed_mibps>0?'未达标':'无下载样本'}</td></tr>`;
+    return `<tr class="${row.selected?'selected':''}">${source}<td>${esc(row.ip)}<small>${esc(row.colo || '—')}</small></td><td>${row.measured === false ? '—' : Number(row.latency_ms).toFixed(2)+' ms'}</td><td>${row.measured === false ? '—' : Number(row.bandwidth_mbps).toFixed(2)+' Mbps'}</td><td class="${good?'good':'bad'}">${row.selected?'入选':good?'达标':row.measured===false?'无有效样本':row.speed_mibps>0?'未达标':'无下载样本'}</td></tr>`;
   }).join('');
 }
 let currentStatus = {max_latency_ms:100,min_bandwidth_mbps:30};
@@ -65,7 +66,8 @@ async function refresh() {
     $('#last').textContent = data.last_run ? `上次：${date(data.last_run)}` : `每 ${data.interval_seconds/3600} 小时检查`;
     const intervalInput = $('#interval-minutes');
     if (document.activeElement !== intervalInput) intervalInput.value = Math.round(data.interval_seconds / 60);
-    $('#interval-status').textContent = data.busy ? '任务运行中，稍后可修改' : `当前每 ${Math.round(data.interval_seconds / 60)} 分钟检查一次`;
+    intervalInput.disabled = $('#interval-save').disabled = sending || data.busy || !data.manual_enabled;
+    $('#interval-status').textContent = intervalMessage || (data.busy ? '任务运行中，稍后可修改' : `当前每 ${Math.round(data.interval_seconds / 60)} 分钟检查一次`);
     $('#phase').textContent = phases[data.phase] || data.phase;
     $('#notice').textContent = actionError || (data.phase === 'unconfigured' ? '预览模式，请先配置部署。' : data.message);
     $('#notice').className = actionError || ['error','degraded','unconfigured','stopped'].includes(data.phase) ? 'notice error' : 'notice';
@@ -89,6 +91,9 @@ async function refresh() {
     renderResultRows('#check-rows', data.check_results, false);
     renderResultRows('#selection-rows', (data.selection_results || []).slice(0, 10), false);
     renderResultRows('#ranked-rows', data.ranked_results, true);
+    $('#check-time').textContent = data.check_time ? date(data.check_time) : '';
+    $('#selection-time').textContent = data.selection_time ? `${date(data.selection_time)} · ${data.selection_results.length} 条` : '';
+    $('#ranked-time').textContent = data.ranked_time ? date(data.ranked_time) : '';
     $('#events').innerHTML = data.events.length ? [...data.events].reverse().map(event=>`<li><time>${esc(date(event.time))}</time><span>${esc(event.message)}</span></li>`).join('') : '<li class="muted">等待首次检查</li>';
   } catch {
     disableActions();
@@ -147,6 +152,7 @@ $('#interval-save').addEventListener('click', async () => {
     return;
   }
   sending = true;
+  intervalMessage = '';
   disableActions();
   $('#interval-save').disabled = true;
   try {
@@ -154,7 +160,7 @@ $('#interval-save').addEventListener('click', async () => {
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || '保存失败');
   } catch (error) {
-    $('#interval-status').textContent = error.message || '保存失败';
+    intervalMessage = error.message || '保存失败';
   } finally {
     sending = false;
     await refresh();
