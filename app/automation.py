@@ -953,10 +953,10 @@ def make_dashboard(status, controller=None):
                 return
             elif self.path == "/health":
                 body, mime = b'{"ok":true}', "application/json"
-            elif self.path in ("/", "/auto.js", "/auto.css"):
-                name = {"/": "auto.html", "/auto.js": "auto.js", "/auto.css": "auto.css"}[self.path]
+            elif self.path in ("/", "/auto.js", "/auto.css", "/logo.svg"):
+                name = {"/": "auto.html", "/auto.js": "auto.js", "/auto.css": "auto.css", "/logo.svg": "logo.svg"}[self.path]
                 body = (ROOT / "static" / name).read_bytes()
-                mime = {"/": "text/html; charset=utf-8", "/auto.js": "text/javascript", "/auto.css": "text/css"}[self.path]
+                mime = {"/": "text/html; charset=utf-8", "/auto.js": "text/javascript", "/auto.css": "text/css", "/logo.svg": "image/svg+xml"}[self.path]
             else:
                 self.send_error(404)
                 return

@@ -1,6 +1,6 @@
 services:
   cfst-dns:
-    image: cotelforce/cloudflare-ip-tester:3.2.11
+    image: cotelforce/cloudflare-ip-tester:3.2.12
     container_name: cfst-dns
     restart: unless-stopped
     init: true
