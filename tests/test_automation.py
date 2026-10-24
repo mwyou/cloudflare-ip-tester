@@ -230,15 +230,16 @@ class AutomationTests(unittest.TestCase):
             client.replace(records(), NEW)
         self.assertEqual(client.request.call_count, 1)
 
-    def test_candidate_sampling_and_authoritative_file(self):
+    def test_cfst_network_sources_and_authoritative_file(self):
         pool = auto.candidate_pool(self.cfg, IPS)
-        self.assertEqual(len(pool), 128)
-        self.assertEqual(len(set(pool)), 128)
-        self.assertEqual(pool[:3], IPS)
-        self.assertTrue(all(auto.is_cloudflare_ip(ip) for ip in pool))
+        self.assertEqual(pool, [str(net) for net in auto.CF_NETWORKS if net.version == 4])
+        self.assertEqual(len(set(pool)), 15)
+        self.assertEqual(auto.candidate_count(pool), 5956)
+        self.assertTrue(all('/' in value for value in pool))
         path = Path(self.folder.name)/"ips.txt"
-        path.write_text("\n".join(NEW))
-        self.assertEqual(auto.candidate_pool(replace(self.cfg, candidate_file=str(path)), IPS), NEW)
+        path.write_text("104.16.0.0/13\n" + "\n".join(NEW))
+        custom = auto.candidate_pool(replace(self.cfg, candidate_file=str(path)), IPS)
+        self.assertEqual(custom, ["104.16.0.0/13", *NEW])
         path.write_text("127.0.0.1\n"+"\n".join(NEW))
         with self.assertRaises(auto.ServiceError):
             auto.candidate_pool(replace(self.cfg, candidate_file=str(path)), [])
@@ -252,6 +253,43 @@ class AutomationTests(unittest.TestCase):
         self.assertAlmostEqual(parsed[0]["bandwidth_mbps"], 50.332, places=3)
         with self.assertRaises(auto.ServiceError):
             auto.parse_csv(path, set(NEW))
+        self.assertEqual(len(auto.parse_csv(path, ["104.18.13.0/24"])), 2)
+        with self.assertRaises(auto.ServiceError):
+            auto.parse_csv(path, ["104.18.14.0/24"])
+
+    def test_cidr_validation_and_small_ranges(self):
+        self.assertTrue(auto._valid_source("104.18.0.0/16", "A"))
+        self.assertFalse(auto._valid_source("0.0.0.0/0", "A"))
+        self.assertFalse(auto._valid_source("104.16.0.0/12", "A"))
+        self.assertFalse(auto._valid_source("2606:4700::/32", "AAAA"))
+        self.assertFalse(auto._valid_source("104.18.0.0/16", "AAAA"))
+        self.assertEqual(auto.candidate_count(["104.18.13.0/24", "104.18.14.0/23", IPS[0]]), 4)
+        path = Path(self.folder.name)/"cidr.txt"
+        path.write_text("104.18.0.0/16")
+        self.assertEqual(auto.candidate_pool(replace(self.cfg, candidate_file=str(path)), IPS), ["104.18.0.0/16"])
+        ipv6 = auto.candidate_pool(replace(self.cfg, kind="AAAA"), [])
+        self.assertEqual(len(ipv6), 128)
+        self.assertTrue(all(auto._valid_source(ip, "AAAA") for ip in ipv6))
+
+    def test_cidr_runner_passes_networks_without_reducing_download_count(self):
+        script = Path(self.folder.name)/"cidr-cfst.py"
+        script.write_text('''import csv,pathlib,sys
+a=sys.argv[1:]
+assert pathlib.Path(a[a.index('-f')+1]).read_text().strip()=='104.18.0.0/16'
+assert a[a.index('-dn')+1]=='10'
+assert a[a.index('-p')+1]=='10'
+with open(a[a.index('-o')+1], 'w', encoding='utf-8', newline='') as f:
+ w=csv.writer(f)
+ w.writerow(['IP 地址','已发送','已接收','丢包率','平均延迟','下载速度(MB/s)','地区码'])
+ for i in range(12): w.writerow(['104.18.13.'+str(i+1),4,4,0,70,5 if i<10 else 0,'TEST'])
+''', encoding="utf-8")
+        original = subprocess.Popen
+        def launch(args, **kwargs):
+            return original([sys.executable, str(script), *args[1:]], **kwargs)
+        with patch.object(auto.subprocess, "Popen", side_effect=launch):
+            rows = auto.CFSTRunner(self.cfg, self.stop).run(["104.18.0.0/16"], 10)
+        self.assertEqual(len(rows), 12)
+        self.assertEqual(sum(r['speed_mibps'] > 0 for r in rows), 10)
 
     def test_persisted_status_excludes_credentials(self):
         path = Path(self.folder.name)/"status.json"
@@ -286,9 +324,10 @@ class AutomationTests(unittest.TestCase):
 a=sys.argv[1:]
 assert 'CF_API_TOKEN' not in os.environ
 assert a[a.index('-dt')+1]=='10'
+assert a[a.index('-n')+1]=='200'
 assert a[a.index('-t')+1]=='4'
 assert a[a.index('-p')+1]=='3'
-assert a[a.index('-tl')+1]=='2000'
+assert a[a.index('-tl')+1]=='9999'
 assert a[a.index('-sl')+1]=='0'
 ips=pathlib.Path(a[a.index('-f')+1]).read_text().splitlines()
 with open(a[a.index('-o')+1], 'w', encoding='utf-8', newline='') as f:

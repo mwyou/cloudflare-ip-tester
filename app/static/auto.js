@@ -92,7 +92,7 @@ async function refresh() {
     renderResultRows('#selection-rows', data.selection_results, false);
     renderResultRows('#ranked-rows', data.ranked_results, true);
     $('#check-time').textContent = data.check_time ? date(data.check_time) : '';
-    $('#selection-count').textContent = data.selection_candidate_count ? `候选 ${data.selection_candidate_count} 个 · 结果 ${data.selection_results.length} 条` : '';
+    $('#selection-count').textContent = data.selection_candidate_count ? `候选 ${data.selection_candidate_count} 个 · CSV ${data.selection_results.length} 条` : '';
     $('#selection-time').textContent = data.selection_time ? date(data.selection_time) : '';
     $('#ranked-time').textContent = data.ranked_time ? date(data.ranked_time) : '';
     $('#events').innerHTML = data.events.length ? [...data.events].reverse().map(event=>`<li><time>${esc(date(event.time))}</time><span>${esc(event.message)}</span></li>`).join('') : '<li class="muted">等待首次检查</li>';

@@ -32,17 +32,17 @@ Compose 只运行一个服务。网站镜像版本在 `image` 中修改，CFST �
 
 1. 启动时如果已有三条有效 DNS 记录，直接检测并进入监控；没有 DNS 记录时才先优选新 IP。
 2. 每小时从 Cloudflare 读取当前记录，检测 TCP 平均延迟和下载带宽。全部满足 **延迟 ≤ 100 ms、带宽 > 30 Mbps** 就保留。
-3. 任一 IP 不达标时，保留当前三条检测结果，并使用 CFST 原样输出的优选结果（默认 10 条）；两组结果按 IP 去重，当前检测结果优先，再按下载速度降序、同速按延迟升序排序，取前三个 IP，不再进行第三次测速。
+3. 任一 IP 不达标时，保留当前三条检测结果，并使用 CFST 输出的全部 CSV 结果（默认对其中 10 个 IP 测下载）；两组结果按 IP 去重，当前检测结果优先，再按下载速度降序、同速按延迟升序排序，取前三个 IP，不再进行第三次测速。
 4. 只有去重排序后至少有三个唯一 IP 才同步目标域名的 A 记录，灰云、TTL 60 秒。其他名称和记录类型保留；`RECORD_TYPE` 可改为 `"AAAA"`。
 5. 测速或 API 报错、排序后不足三个 IP 时保留原 DNS；429 限流时结束本周期，等待下次检查。页面会显示当前检测结果、CFST 实际输出结果、去重排序结果和 DNS 变更前后记录。
 
 页面中的“读取 DNS、检测当前 IP、优选新 IP、去重排序、写入 DNS”可单独启动，不会自动继续下一步。手动步骤与定时任务共用执行锁；待写入结果有效期 30 分钟，写入前再次核对 DNS 快照。检查间隔可以在页面修改，范围为 1～1440 分钟，修改只在当前容器运行期间生效。
 
-默认从 Cloudflare 网段均衡抽样 128 个候选，优选阶段让 CFST 下载测试并输出 10 个结果；面板保留 CFST 实际输出的全部结果。测速使用部署机器的出口，真实下载会消耗流量。CFST CSV 的速度按 MiB/s 换算为 Mbps 后比较。
+默认把完整的 Cloudflare CIDR 网段交给 CFST，由 CFST 按每个 `/24` 展开并完成延迟筛选；当前官方 IPv4 网段约有 5956 个候选，优选阶段默认下载测试 10 个 IP，终端显示前 10 行。CSV 包含所有通过延迟筛选的结果，其中部分 IP 未参与下载测试，速度零值不能一律解释成下载失败。面板保留 CFST 实际输出的全部结果。测速使用部署机器的出口，真实下载会消耗流量。CFST CSV 的速度按 MiB/s 换算为 Mbps 后比较。
 
-默认参数已经内置：延迟 100 ms、带宽 30 Mbps、每小时检查、128 个候选、CFST 输出 10 个结果、单 IP 10 秒，测速地址为 `https://cf.xiu2.xyz/url`。延迟、带宽和候选参数需要调整时，在 Compose 的 `environment` 中添加 `MAX_LATENCY_MS`、`MIN_BANDWIDTH_MBPS`、`CANDIDATE_COUNT`、`DOWNLOAD_COUNT`、`DOWNLOAD_SECONDS` 或 `CFST_URL`，数值使用带引号的字符串；检查间隔直接在页面设置。
+默认参数已经内置：监控延迟 100 ms、带宽 30 Mbps、每小时检查、CFST 下载测试 10 个 IP、单 IP 10 秒、延迟测速线程 200，测速地址为 `https://cf.xiu2.xyz/url`。监控阈值、CFST 下载测试数量、测速时长和测速地址需要调整时，在 Compose 的 `environment` 中添加 `MAX_LATENCY_MS`、`MIN_BANDWIDTH_MBPS`、`DOWNLOAD_COUNT`、`DOWNLOAD_SECONDS` 或 `CFST_URL`，数值使用带引号的字符串；检查间隔直接在页面设置。
 
-需要自定义候选时，创建 `config/candidates.txt`，每行一个 Cloudflare IP，在 `environment` 添加 `CANDIDATE_FILE: "/config/candidates.txt"`，在 `volumes` 添加 `./config:/config:ro`。候选为 3～512 个去重 IP，不接受 CIDR。
+需要自定义候选时，创建 `config/candidates.txt`，每行一个 Cloudflare IP 或 CIDR 网段，在 `environment` 添加 `CANDIDATE_FILE: "/config/candidates.txt"`，在 `volumes` 添加 `./config:/config:ro`。候选文件最多 512 行，IPv4 网段由 CFST 展开。来源需在当前 Cloudflare 公布范围内；旧版 ip.txt 的宽泛网段可能超出此范围。IPv6 默认仍用 128 个具体候选，避免展开巨大 IPv6 网段；自定义 IPv6 CIDR 仅支持 /112 或更小范围。CANDIDATE_COUNT 仅用于 IPv6，不再限制 IPv4。
 
 ## 状态与数据
 

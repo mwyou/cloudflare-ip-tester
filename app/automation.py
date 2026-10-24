@@ -61,10 +61,11 @@ class Settings:
     latency_ms: float = 100
     min_mbps: float = 30
     interval: int = 3600
+    # IPv6 sampling only. IPv4 CIDRs are expanded by CFST itself.
     candidates: int = 128
     download_count: int = 10
     download_seconds: int = 10
-    threads: int = 8
+    threads: int = 200
     test_url: str = "https://cf.xiu2.xyz/url"
     binary: str = "/usr/local/bin/cfst"
     candidate_file: str = ""
@@ -92,7 +93,7 @@ class Settings:
                    number("CHECK_INTERVAL_SECONDS", 3600, MIN_INTERVAL_SECONDS, 86400, True),
                    number("CANDIDATE_COUNT", 128, 3, 512, True),
                    number("DOWNLOAD_COUNT", 10, 3, 50, True),
-                   number("DOWNLOAD_SECONDS", 10, 5, 30, True), number("CFST_THREADS", 8, 1, 16, True),
+                   number("DOWNLOAD_SECONDS", 10, 5, 30, True), number("CFST_THREADS", 200, 1, 1000, True),
                    validate_url(os.environ.get("CFST_URL", cls.test_url)),
                    os.environ.get("CFST_BIN", cls.binary), os.environ.get("CANDIDATE_FILE", ""),
                    Path(os.environ.get("DATA_DIR", "/data")), number("DNS_TTL", 60, 60, 86400, True),
@@ -205,8 +206,24 @@ def dns_plan(settings, records, ips):
     return plan
 
 
+def _allowed_matcher(allowed):
+    addresses, networks = set(), []
+    for value in allowed:
+        try:
+            addresses.add(str(ipaddress.ip_address(value)))
+            continue
+        except ValueError:
+            pass
+        try:
+            networks.append(ipaddress.ip_network(value, strict=False))
+        except ValueError:
+            raise ServiceError("CFST 候选来源含无效 IP 或网段") from None
+    return lambda ip: ip in addresses or any(ipaddress.ip_address(ip) in network for network in networks)
+
+
 def parse_csv(path, allowed):
     rows = []
+    is_allowed = _allowed_matcher(allowed)
     with Path(path).open(encoding="utf-8-sig", newline="") as stream:
         reader = csv.reader(stream)
         header = next(reader, [])
@@ -218,7 +235,7 @@ def parse_csv(path, allowed):
                 ip = str(ipaddress.ip_address(cells[0]))
                 sent, received = int(cells[1]), int(cells[2])
                 loss, latency, speed = map(float, cells[3:6])
-                if (ip not in allowed or ip in seen or not 0 < received <= sent or
+                if (not is_allowed(ip) or ip in seen or not 0 < received <= sent or
                         not all(math.isfinite(n) for n in (loss, latency, speed)) or
                         not 0 <= loss <= 1 or latency < 0 or speed < 0):
                     raise ValueError()
@@ -241,23 +258,25 @@ class CFSTRunner:
         self.settings, self.stop = settings, stop
 
     def run(self, ips, download_count):
-        if not ips or not all(is_cloudflare_ip(ip) for ip in ips):
-            raise ServiceError("测速候选必须为 Cloudflare 公网 IP")
+        if not ips or not all(_valid_source(source, self.settings.kind) for source in ips):
+            raise ServiceError("测速候选必须为 Cloudflare IP 或网段")
         cfg = self.settings
         with tempfile.TemporaryDirectory(prefix="cfst-", dir=cfg.data_dir) as folder:
             source, result = Path(folder) / "ips.txt", Path(folder) / "result.csv"
             source.write_text("\n".join(ips) + "\n", encoding="ascii")
             args = [cfg.binary, "-f", str(source), "-o", str(result), "-url", cfg.test_url,
                     "-n", str(cfg.threads), "-t", "4", "-tp", str(urlsplit(cfg.test_url).port or (443 if cfg.test_url.startswith("https:") else 80)),
-                    "-dn", str(min(download_count, len(ips))), "-dt", str(cfg.download_seconds),
-                    # Let CFST return the tested rows; apply the service's
-                    # latency threshold after parsing the CSV.
-                    "-tl", "2000", "-sl", "0", "-p", str(min(download_count, len(ips))), "-debug"]
+                    "-dn", str(min(download_count, candidate_count(ips))), "-dt", str(cfg.download_seconds),
+                    # Match CFST's normal selection: test all CIDR-derived
+                    # candidates, then return the requested download results.
+                    # The service applies its 100 ms / 30 Mbps monitor rule
+                    # separately; it must not narrow CFST's output here.
+                    "-tl", "9999", "-sl", "0", "-p", str(min(download_count, candidate_count(ips))), "-debug"]
             # CFST is a child process without API credentials or environment proxies.
             env = {k: v for k, v in os.environ.items() if k.upper() in
                    ("PATH", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "SSL_CERT_FILE", "SSL_CERT_DIR", "LANG", "LC_ALL")}
             try:
-                process = subprocess.Popen(args, cwd=folder, env=env, stdout=subprocess.PIPE,
+                process = subprocess.Popen(args, cwd=folder, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                            stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace")
             except OSError:
                 raise ServiceError("CFST 无法启动；请检查 CFST 运行目录或 CFST_BIN") from None
@@ -272,7 +291,7 @@ class CFSTRunner:
 
             reader = threading.Thread(target=collect, daemon=True)
             reader.start()
-            deadline = time.monotonic() + 30 + math.ceil(len(ips) / cfg.threads) * 6 + min(download_count, len(ips)) * (cfg.download_seconds + 3)
+            deadline = time.monotonic() + 60 + math.ceil(candidate_count(ips) / cfg.threads) * 6 + min(download_count, candidate_count(ips)) * (cfg.download_seconds + 3)
             try:
                 ended = False
                 while not ended:
@@ -288,10 +307,17 @@ class CFSTRunner:
                         ended = True
                     elif re.search(r"(?:状态码|status(?:\s+code)?)[：:\s]+429\b", line, re.I):
                         raise RateLimited("测速源返回 429；已停止 CFST，保留 DNS，等待下个周期")
+                    else:
+                        for marker in ("CloudflareSpeedTest", "开始延迟测速", "开始下载测速", "[调试]", "[信息]"):
+                            if marker in line:
+                                # CFST redraws progress with backspaces on the
+                                # same line; keep only the diagnostic suffix.
+                                LOG.info("CFST: %s", line[line.rfind(marker):].strip()[:2000])
+                                break
                 code = process.wait(timeout=3)
                 if code != 0 or not result.is_file():
                     raise ServiceError("CFST 未产生有效结果；保留原 DNS")
-                return parse_csv(result, set(ips))
+                return parse_csv(result, ips)
             finally:
                 if process.poll() is None:
                     process.terminate()
@@ -304,38 +330,82 @@ class CFSTRunner:
                 process.stdout.close()
 
 
+def _valid_source(value, kind):
+    version = 4 if kind == "A" else 6
+    try:
+        address = ipaddress.ip_address(value)
+        return address.version == version and is_cloudflare_ip(value)
+    except ValueError:
+        try:
+            network = ipaddress.ip_network(value, strict=False)
+        except ValueError:
+            return False
+        if network.version != version:
+            return False
+        # CFST's IPv6 expansion is random and unbounded for large prefixes.
+        if version == 6 and network.prefixlen < 112:
+            return False
+        end, cursor = int(network.broadcast_address), int(network.network_address)
+        for allowed in sorted((net for net in CF_NETWORKS if net.version == version), key=lambda net: int(net.network_address)):
+            left, right = int(allowed.network_address), int(allowed.broadcast_address)
+            if right < cursor:
+                continue
+            if left > cursor:
+                break
+            cursor = max(cursor, right + 1)
+            if cursor > end:
+                return True
+        return False
+
+
+def candidate_count(sources):
+    count = 0
+    for source in sources:
+        try:
+            ipaddress.ip_address(source)
+        except ValueError:
+            network = ipaddress.ip_network(source, strict=False)
+            count += max(1, network.num_addresses // (256 if network.version == 4 else 65536))
+        else:
+            count += 1
+    return count
+
+
 def candidate_pool(settings, existing):
     version = 4 if settings.kind == "A" else 6
-    valid = lambda ip: is_cloudflare_ip(ip) and ipaddress.ip_address(ip).version == version
-    current = list(dict.fromkeys(ip for ip in existing if valid(ip)))[:settings.candidates]
     if settings.candidate_file:
         pool = []
         for line in Path(settings.candidate_file).read_text(encoding="utf-8-sig").splitlines():
             value = line.split("#", 1)[0].strip()
             if not value:
                 continue
+            if not _valid_source(value, settings.kind):
+                raise ServiceError("候选文件包含不属于所选 Cloudflare 地址族的 IP 或网段")
             try:
                 value = str(ipaddress.ip_address(value))
             except ValueError:
-                raise ServiceError("候选文件每行必须是一个完整 IP，不支持网段") from None
-            if not valid(value):
-                raise ServiceError("候选文件包含不属于所选 Cloudflare 地址族的 IP")
+                value = str(ipaddress.ip_network(value, strict=False))
             pool.append(value)
         pool = list(dict.fromkeys(pool))
         if len(pool) > 512:
-            raise ServiceError("候选文件最多支持 512 个 IP")
+            raise ServiceError("候选文件最多支持 512 个 IP 或网段")
         # A user-specified file is authoritative, including removal of old IPs.
-        if len(pool) < 3:
-            raise ServiceError("候选文件至少需要三个去重 IP")
+        if not pool or candidate_count(pool) < 3:
+            raise ServiceError("候选文件至少需要三个可测速候选 IP")
         return pool
-    networks = [net for net in CF_NETWORKS if net.version == version]
-    pool = set(current)
-    while len(pool) < settings.candidates:
-        net = secrets.choice(networks)
-        ip = str(net.network_address + 1 + secrets.randbelow(net.num_addresses - 2))
-        if valid(ip):
-            pool.add(ip)
-    return current + sorted(pool.difference(current))
+    if version == 6:
+        # Preserve the bounded IPv6 selection; large IPv6 CIDRs cannot be
+        # passed directly to CFST's address expansion.
+        networks = [net for net in CF_NETWORKS if net.version == 6]
+        pool = set()
+        while len(pool) < settings.candidates:
+            net = secrets.choice(networks)
+            pool.add(str(net.network_address + 1 + secrets.randbelow(net.num_addresses - 2)))
+        return sorted(pool)
+    # Pass the complete official CIDR list to CFST. CFST itself expands each
+    # range to one candidate per /24 and performs the latency/download stages.
+    # Sampling concrete addresses here changes CFST's selection algorithm.
+    return [str(net) for net in CF_NETWORKS if net.version == version]
 
 
 class Status:
@@ -489,12 +559,14 @@ class Maintainer:
         steps.pop("select", None)
         self.status.update(phase="selecting", steps=steps, message="正在优选新 IP")
         pool = candidate_pool(self.cfg, self.valid_ips())
+        LOG.info("CFST 优选来源：%s 行，IPv4 / 具体 IP 候选计数 %s，延迟线程 %s，下载测试上限 %s",
+                 len(pool), candidate_count(pool), self.cfg.threads, self.cfg.download_count)
         rows = self.runner.run(pool, self.cfg.download_count)
         self.selection_rows = rows
         self.new_top, self.selected_at = rows, time.time()
         self.complete("select", len(rows))
         self.status.update(results=rows, selection_results=rows, selection_time=time.time(),
-                           selection_candidate_count=len(pool), phase="select_done",
+                           selection_candidate_count=candidate_count(pool), phase="select_done",
                            message=f"优选完成：CFST 输出 {len(self.new_top)} 条结果")
         return rows
 
