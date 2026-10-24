@@ -62,7 +62,7 @@ class Settings:
     min_mbps: float = 30
     interval: int = 3600
     candidates: int = 128
-    download_count: int = 20
+    download_count: int = 10
     download_seconds: int = 10
     threads: int = 8
     test_url: str = "https://cf.xiu2.xyz/url"
@@ -91,7 +91,7 @@ class Settings:
                    number("MAX_LATENCY_MS", 100, 1, 2000), number("MIN_BANDWIDTH_MBPS", 30, 0.1, 10000),
                    number("CHECK_INTERVAL_SECONDS", 3600, MIN_INTERVAL_SECONDS, 86400, True),
                    number("CANDIDATE_COUNT", 128, 3, 512, True),
-                   number("DOWNLOAD_COUNT", 20, 3, 50, True),
+                   number("DOWNLOAD_COUNT", 10, 3, 50, True),
                    number("DOWNLOAD_SECONDS", 10, 5, 30, True), number("CFST_THREADS", 8, 1, 16, True),
                    validate_url(os.environ.get("CFST_URL", cls.test_url)),
                    os.environ.get("CFST_BIN", cls.binary), os.environ.get("CANDIDATE_FILE", ""),
@@ -184,7 +184,7 @@ def dns_plan(settings, records, ips):
     ips = [str(ipaddress.ip_address(ip)) for ip in ips]
     if len(set(ips)) != 3 or len(ips) != 3 or not all(
             is_cloudflare_ip(ip) and ipaddress.ip_address(ip).version == (4 if settings.kind == "A" else 6) for ip in ips):
-        raise ServiceError("只有三个去重且属于 Cloudflare 的合格 IP 才能写入")
+        raise ServiceError("只有三个去重且属于 Cloudflare 的 IP 才能写入")
     if any(r.get("type") in ("CNAME", "NS") for r in records):
         raise ServiceError("目标域名存在 CNAME / NS 冲突；请先使用独立的优选域名")
     pending = set(ips)
@@ -250,7 +250,9 @@ class CFSTRunner:
             args = [cfg.binary, "-f", str(source), "-o", str(result), "-url", cfg.test_url,
                     "-n", str(cfg.threads), "-t", "4", "-tp", str(urlsplit(cfg.test_url).port or (443 if cfg.test_url.startswith("https:") else 80)),
                     "-dn", str(min(download_count, len(ips))), "-dt", str(cfg.download_seconds),
-                    "-tl", str(math.ceil(cfg.latency_ms) + 1), "-sl", "0", "-p", "0", "-debug"]
+                    # Let CFST return the tested rows; apply the service's
+                    # latency threshold after parsing the CSV.
+                    "-tl", "2000", "-sl", "0", "-p", str(min(download_count, len(ips))), "-debug"]
             # CFST is a child process without API credentials or environment proxies.
             env = {k: v for k, v in os.environ.items() if k.upper() in
                    ("PATH", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "SSL_CERT_FILE", "SSL_CERT_DIR", "LANG", "LC_ALL")}
@@ -346,6 +348,7 @@ class Status:
                      "dns_ips": [], "previous_dns_ips": [], "dns_change": None,
                      "results": [], "check_results": [], "selection_results": [], "ranked_results": [],
                      "check_time": None, "selection_time": None, "ranked_time": None,
+                     "selection_candidate_count": None,
                      "events": [], "steps": {}, "proposed_ips": [],
                      "manual_enabled": False, "busy": False, "active_action": None}
         if path and path.is_file():
@@ -354,6 +357,7 @@ class Status:
                 if previous.get("domain") == settings.domain and previous.get("record_type") == settings.kind:
                     for key in ("events", "last_dns_update", "results", "check_results", "selection_results",
                                 "ranked_results", "check_time", "selection_time", "ranked_time",
+                                "selection_candidate_count",
                                 "dns_ips", "previous_dns_ips", "dns_change"):
                         self.data[key] = previous.get(key, self.data[key])
             except (ValueError, OSError):
@@ -412,7 +416,7 @@ class Maintainer:
         compare_dns_reason = dns_reason if self.records is not None else None
         reasons["compare"] = compare_dns_reason or selection_reason or current_reason
         reasons["write"] = dns_reason or selection_reason or (
-            "先完成六个结果排序，取得三个达标 IP" if len(self.final) != 3 else
+            "先完成去重排序，取得三个 IP" if len(self.final) != 3 else
             (None if self.fresh(self.compared_at) else "排序结果已过期，请重新排序"))
         if self.stop.is_set():
             return dict.fromkeys(ACTIONS, "服务已停止")
@@ -487,10 +491,11 @@ class Maintainer:
         pool = candidate_pool(self.cfg, self.valid_ips())
         rows = self.runner.run(pool, self.cfg.download_count)
         self.selection_rows = rows
-        self.new_top, self.selected_at = self.top(rows), time.time()
-        self.complete("select", len(self.new_top))
-        self.status.update(results=rows, selection_results=rows, selection_time=time.time(), phase="select_done",
-                           message=f"优选完成：取得 {len(self.new_top)} 个达标候选")
+        self.new_top, self.selected_at = rows, time.time()
+        self.complete("select", len(rows))
+        self.status.update(results=rows, selection_results=rows, selection_time=time.time(),
+                           selection_candidate_count=len(pool), phase="select_done",
+                           message=f"优选完成：CFST 输出 {len(self.new_top)} 条结果")
         return rows
 
     def top(self, rows):
@@ -500,26 +505,24 @@ class Maintainer:
     def compare(self):
         self.require_action("compare")
         self.invalidate_final()
-        old = [{**row, "source": "当前检测"} for row in (self.check_rows or [])]
-        new = [{**row, "source": "新 IP 优选"} for row in (self.new_top or [])]
-        ranked = sorted(old + new, key=lambda r: (-r["speed_mibps"], r["latency_ms"]))
+        merged = {}
+        for row in self.check_rows or []:
+            merged[row["ip"]] = {**row, "source": "当前检测"}
+        for row in self.selection_rows or self.new_top or []:
+            merged.setdefault(row["ip"], {**row, "source": "新 IP 优选"})
+        ranked = sorted(merged.values(), key=lambda r: (-r["speed_mibps"], r["latency_ms"]))
         self.ranked = ranked
-        seen = set()
-        good = []
-        for row in ranked:
-            if qualifies(self.cfg, row) and row["ip"] not in seen:
-                seen.add(row["ip"])
-                good.append(row)
+        good = ranked[:3]
         self.complete("compare", len(good))
         if len(good) < 3:
             self.status.update(results=ranked, ranked_results=ranked, ranked_time=time.time(), phase="degraded",
-                               message=f"六个结果排序后仅找到 {len(good)} 个达标 IP；保留现有 DNS")
+                               message=f"去重排序后只有 {len(good)} 个结果；保留现有 DNS")
             return False
         self.final, self.compared_at = good[:3], time.time()
         for row in self.final:
             row["selected"] = True
         self.status.update(results=ranked, ranked_results=ranked, ranked_time=time.time(), proposed_ips=[r["ip"] for r in self.final],
-                           phase="compare_done", message="六个结果已排序，前三名待写入")
+                           phase="compare_done", message="去重排序完成，前三名待写入")
         return True
 
     def write(self):
@@ -552,9 +555,9 @@ class Maintainer:
         managed = [r for r in self.records if r.get("type") == self.cfg.kind]
         current_dns_ready = (len(managed) == len(ips) == 3 and all(
                 is_cloudflare_ip(ip) for ip in ips) and not any(r.get("proxied") for r in managed))
-        if self.valid_ips():
+        if current_dns_ready:
             healthy = self.check()
-            if current_dns_ready and healthy and not (initial and self.cfg.initial_select):
+            if healthy:
                 return
         self.select()
         if self.compare():

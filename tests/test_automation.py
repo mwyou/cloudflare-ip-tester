@@ -96,7 +96,7 @@ class AutomationTests(unittest.TestCase):
                                        ]
         with patch.object(auto, "candidate_pool", return_value=IPS+NEW):
             self.service.cycle()
-        self.assertEqual([call.args for call in self.runner.run.call_args_list], [(IPS, 3), (IPS+NEW, 20)])
+        self.assertEqual([call.args for call in self.runner.run.call_args_list], [(IPS, 3), (IPS+NEW, 10)])
         self.client.replace.assert_called_once_with(records(), [NEW[1], IPS[1], IPS[2]])
         snapshot = self.status.snapshot()
         self.assertEqual(snapshot["dns_ips"], [NEW[1], IPS[1], IPS[2]])
@@ -107,11 +107,11 @@ class AutomationTests(unittest.TestCase):
         self.assertEqual(snapshot["dns_change"]["after"], [NEW[1], IPS[1], IPS[2]])
 
     def test_initial_start_selects_even_if_old_dns_is_healthy(self):
-        self.runner.run.side_effect = [[row(ip) for ip in IPS], [row(ip, speed=8) for ip in NEW]]
+        self.runner.run.return_value = [row(ip) for ip in IPS]
         with patch.object(auto, "candidate_pool", return_value=NEW):
             self.service.cycle(initial=True)
-        self.assertEqual([call.args for call in self.runner.run.call_args_list], [(IPS, 3), (NEW, 20)])
-        self.client.replace.assert_called_once()
+        self.runner.run.assert_called_once_with(IPS, 3)
+        self.client.replace.assert_not_called()
 
     def test_start_without_records_bootstraps(self):
         self.client.records.return_value = []
@@ -124,44 +124,44 @@ class AutomationTests(unittest.TestCase):
         self.runner.run.side_effect = [[row(ip) for ip in IPS], [row(NEW[0]), row(NEW[1]), row(NEW[2], speed=1)]]
         with patch.object(auto, "candidate_pool", return_value=NEW):
             self.service.cycle(initial=True)
-        self.assertEqual(self.runner.run.call_count, 2)
-        self.client.replace.assert_called_once_with(records(), [IPS[0], IPS[1], IPS[2]])
-        self.assertEqual(self.status.snapshot()["phase"], "updated")
+        self.runner.run.assert_called_once_with(IPS, 3)
+        self.client.replace.assert_not_called()
+        self.assertEqual(self.status.snapshot()["phase"], "healthy")
 
     def test_overlapping_ips_keep_both_samples_but_write_unique_ips(self):
         initial = [row(IPS[0], speed=10), row(IPS[1], speed=8), row(IPS[2], speed=6)]
-        selected = [row(IPS[0], speed=4), row(NEW[0], speed=8), row(NEW[1], speed=6)]
+        selected = [row(NEW[0], speed=8), row(NEW[1], speed=6), row(NEW[2], speed=4)]
         self.runner.run.side_effect = [initial, selected]
         with patch.object(auto, "candidate_pool", return_value=IPS+NEW):
             self.service.cycle(initial=True)
-        self.assertEqual([call.args for call in self.runner.run.call_args_list], [(IPS, 3), (IPS+NEW, 20)])
-        self.client.replace.assert_called_once_with(records(), [IPS[0], IPS[1], NEW[0]])
+        self.runner.run.assert_called_once_with(IPS, 3)
+        self.client.replace.assert_not_called()
 
     def test_fewer_than_three_new_qualifiers_can_combine_with_old_ips(self):
         self.runner.run.side_effect = [[row(ip, speed=6) for ip in IPS],
                                       [row(NEW[0], speed=8), row(NEW[1], speed=1), row(NEW[2], speed=1)]]
         with patch.object(auto, "candidate_pool", return_value=NEW):
             self.service.cycle(initial=True)
-        self.assertEqual([call.args for call in self.runner.run.call_args_list], [(IPS, 3), (NEW, 20)])
-        self.client.replace.assert_called_once_with(records(), [NEW[0], IPS[0], IPS[1]])
+        self.runner.run.assert_called_once_with(IPS, 3)
+        self.client.replace.assert_not_called()
 
-    def test_insufficient_combined_qualifiers_preserve_dns(self):
-        self.runner.run.side_effect = [[row(ip, latency=110) for ip in IPS],
+    def test_low_speed_selection_results_can_still_be_ranked(self):
+        self.runner.run.side_effect = [[row(IPS[0], latency=110), row(IPS[1]), row(IPS[2])],
                                       [row(ip, speed=1) for ip in NEW]]
         with patch.object(auto, "candidate_pool", return_value=NEW):
             self.service.cycle(initial=True)
-        self.client.replace.assert_not_called()
-        self.assertEqual(self.status.snapshot()["phase"], "degraded")
+        self.client.replace.assert_called_once_with(records(), [IPS[1], IPS[2], IPS[0]])
+        self.assertEqual(self.status.snapshot()["phase"], "updated")
         self.assertTrue(all(r["speed_mibps"] == 1 for r in self.status.snapshot()["selection_results"]))
 
     def test_rate_limit_during_selection_preserves_dns(self):
-        self.runner.run.side_effect = [[row(ip) for ip in IPS], auto.RateLimited("429")]
+        self.runner.run.side_effect = [[row(IPS[0], latency=110), row(IPS[1]), row(IPS[2])], auto.RateLimited("429")]
         with patch.object(auto, "candidate_pool", return_value=NEW), self.assertRaises(auto.RateLimited):
             self.service.cycle(initial=True)
         self.client.replace.assert_not_called()
 
     def test_equal_final_speeds_prefer_lower_latency(self):
-        current = [row(IPS[0], speed=6, latency=90), row(IPS[1], speed=6, latency=70), row(IPS[2], speed=6, latency=80)]
+        current = [row(IPS[0], speed=6, latency=101), row(IPS[1], speed=6, latency=70), row(IPS[2], speed=6, latency=80)]
         selected = [row(NEW[0], speed=6, latency=60)]
         self.runner.run.side_effect = [current, selected]
         with patch.object(auto, "candidate_pool", return_value=NEW):
@@ -287,6 +287,8 @@ a=sys.argv[1:]
 assert 'CF_API_TOKEN' not in os.environ
 assert a[a.index('-dt')+1]=='10'
 assert a[a.index('-t')+1]=='4'
+assert a[a.index('-p')+1]=='3'
+assert a[a.index('-tl')+1]=='2000'
 assert a[a.index('-sl')+1]=='0'
 ips=pathlib.Path(a[a.index('-f')+1]).read_text().splitlines()
 with open(a[a.index('-o')+1], 'w', encoding='utf-8', newline='') as f:
@@ -400,7 +402,7 @@ class ManualSteps(unittest.TestCase):
         self.client.records.return_value = []
         self.prepare_final()
         self.assertEqual(self.runner.run.call_count, 1)
-        self.runner.run.assert_called_with(NEW, 20)
+        self.runner.run.assert_called_with(NEW, 10)
         self.client.replace.assert_not_called()
 
     def test_missing_preconditions_do_not_run_other_steps(self):
@@ -503,8 +505,9 @@ class ManualSteps(unittest.TestCase):
 
     def test_insufficient_manual_finalists_cannot_write(self):
         self.prepare_final()
-        self.service.new_top = [row(NEW[0]), row(NEW[1])]
-        self.service.check_rows = [row(IPS[0], speed=1), row(IPS[1], speed=1), row(IPS[2], speed=1)]
+        self.service.new_top = [row(NEW[0])]
+        self.service.selection_rows = [row(NEW[0])]
+        self.service.check_rows = [row(IPS[0], speed=1)]
         self.run_step("compare")
         self.assertEqual(self.status.snapshot()["phase"], "degraded")
         with self.assertRaises(auto.ServiceError):

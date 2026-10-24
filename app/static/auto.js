@@ -2,7 +2,7 @@
 const $ = selector => document.querySelector(selector);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 const date = value => value ? new Date(value * 1000).toLocaleString() : '—';
-const phases = {starting:'准备启动',reading:'读取 DNS',read_done:'读取完成',checking:'检查线路',check_done:'检测完成',selecting:'优选新 IP',select_done:'优选完成',comparing:'六个结果排序',compare_done:'等待写入',healthy:'全部达标',updating:'写入 DNS',updated:'已完成同步',degraded:'合格 IP 不足',error:'任务未完成',stopped:'已停止',unconfigured:'等待部署配置',dry_run:'演练完成',cfst_changing:'切换 CFST',cfst_ready:'CFST 已就绪'};
+const phases = {starting:'准备启动',reading:'读取 DNS',read_done:'读取完成',checking:'检查线路',check_done:'检测完成',selecting:'优选新 IP',select_done:'优选完成',comparing:'去重排序',compare_done:'等待写入',healthy:'全部达标',updating:'写入 DNS',updated:'已完成同步',degraded:'结果不足',error:'任务未完成',stopped:'已停止',unconfigured:'等待部署配置',dry_run:'演练完成',cfst_changing:'切换 CFST',cfst_ready:'CFST 已就绪'};
 let sending = false;
 let actionError = '';
 let timer;
@@ -79,7 +79,7 @@ async function refresh() {
       button.disabled = sending || !data.manual_enabled || data.busy || Boolean(reason);
       button.classList.toggle('running', running);
       button.title = reason || '';
-      const countLabel = action === 'read' || action === 'write' ? '个 IP' : '个达标';
+      const countLabel = action === 'select' ? '条结果' : action === 'read' || action === 'write' || action === 'compare' ? '个 IP' : '个达标';
       $(`#step-${action}`).textContent = !data.manual_enabled ? '—' : running ? '运行中…' : (reason && !data.busy ? reason : step ? `已完成 · ${step.count} ${countLabel}` : data.busy ? '等待任务完成' : '可启动');
     });
     $('#proposal').hidden = !data.proposed_ips?.length;
@@ -89,10 +89,11 @@ async function refresh() {
     const change = data.dns_change;
     $('#dns-change').innerHTML = change ? `<strong>上次变更</strong><br>之前：${esc((change.before || []).join('、') || '无')}<br>之后：${esc((change.after || []).join('、') || '无')}<br><span class="muted">${esc(date(change.time))}</span>` : '暂无变更对比';
     renderResultRows('#check-rows', data.check_results, false);
-    renderResultRows('#selection-rows', (data.selection_results || []).slice(0, 10), false);
+    renderResultRows('#selection-rows', data.selection_results, false);
     renderResultRows('#ranked-rows', data.ranked_results, true);
     $('#check-time').textContent = data.check_time ? date(data.check_time) : '';
-    $('#selection-time').textContent = data.selection_time ? `${date(data.selection_time)} · ${data.selection_results.length} 条` : '';
+    $('#selection-count').textContent = data.selection_candidate_count ? `候选 ${data.selection_candidate_count} 个 · 结果 ${data.selection_results.length} 条` : '';
+    $('#selection-time').textContent = data.selection_time ? date(data.selection_time) : '';
     $('#ranked-time').textContent = data.ranked_time ? date(data.ranked_time) : '';
     $('#events').innerHTML = data.events.length ? [...data.events].reverse().map(event=>`<li><time>${esc(date(event.time))}</time><span>${esc(event.message)}</span></li>`).join('') : '<li class="muted">等待首次检查</li>';
   } catch {
