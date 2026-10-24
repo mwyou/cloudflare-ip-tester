@@ -1,15 +1,13 @@
-.env
-.env.*
-!.env.example
-.git
-.github
-ci
-.venv
-__pycache__
-*.pyc
-*.log
-qa
-data
-config
-test_*.py
-*.zip
+# Only runtime sources, the build helper, and licenses enter the build context.
+# Deployment configuration can contain credentials and is excluded.
+**
+!Dockerfile
+!.dockerignore
+!app/
+!app/**
+!docker/
+!docker/fetch_cfst.py
+!LICENSE-CFST
+!THIRD_PARTY.md
+**/__pycache__
+**/*.pyc

@@ -63,6 +63,17 @@ class AutomationTests(unittest.TestCase):
         with patch.dict(os.environ, {"CF_DOMAIN": "cf.example.com", "CF_API_KEY": "global", "CF_EMAIL": "a@example.com"}, clear=True):
             self.assertEqual(auto.Settings.from_env().api_key, "global")
 
+    def test_input_validation(self):
+        for url in ("http://localhost:8080/x", "file:///test", "https://x.example/a\r\nX:yes",
+                    "https://u:p@x.example/", "https://127.0.0.1/"):
+            with self.subTest(url=url), self.assertRaises(ValueError):
+                auto.validate_url(url)
+        self.assertEqual(auto.validate_domain("BestCF.DPDNS.org."), "bestcf.dpdns.org")
+        self.assertFalse(auto.is_cloudflare_ip("127.0.0.1"))
+        self.assertTrue(auto.is_cloudflare_ip("104.18.13.1"))
+        with self.assertRaises(ValueError):
+            auto.validate_domain("bad..example.com")
+
     def test_thresholds_use_mbps_and_strict_bandwidth(self):
         exact = 30e6/8/1048576
         self.assertFalse(auto.qualifies(self.cfg, row(IPS[0], speed=exact)))

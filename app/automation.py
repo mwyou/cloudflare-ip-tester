@@ -23,8 +23,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import ProxyHandler, Request, build_opener
 
-from benchmark import validate_url
-from cloudflare import API, CF_NETWORKS, NoRedirect, is_cloudflare_ip, validate_domain
+from cloudflare import API, CF_NETWORKS, NoRedirect, is_cloudflare_ip, validate_domain, validate_url
 
 LOG = logging.getLogger("cfst-dns")
 ROOT = Path(__file__).resolve().parent

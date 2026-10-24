@@ -14,6 +14,8 @@ jobs:
   tests:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    env:
+      PYTHONPATH: ${{ github.workspace }}/app
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
@@ -40,20 +42,13 @@ jobs:
       - name: Python and real CFST contract tests
         env:
           CFST_TEST_BIN: ${{ runner.temp }}/cfst-check/cfst
-        run: python -m unittest -v test_automation.py test_cfst_manager.py test_app.py
+        run: python -m unittest discover -s tests -p 'test_*.py' -v
       - name: JavaScript syntax
-        run: |
-          node --check static/auto.js
-          node --check static/app.js
+        run: node --check app/static/auto.js
       - name: Compose configuration
-        env:
-          CF_DOMAIN: ci.example.com
-          CF_API_TOKEN: ci-placeholder
         run: |
-          cp .env.example .env
           docker compose config --quiet
-          docker compose -f compose.hub.yaml config --quiet
-          docker compose -f compose.yaml -f compose.build.yaml config --quiet
+          docker compose --profile tools config --quiet
 
   containers:
     runs-on: ubuntu-24.04
@@ -87,7 +82,7 @@ jobs:
           for mode in init existing; do
             docker run --rm --platform "linux/$ARCH" --read-only --cap-drop ALL --security-opt no-new-privileges:true \
               --tmpfs /tmp:size=32m,mode=1777 --volume "$volume:/opt/cfst" \
-              --volume "$GITHUB_WORKSPACE/ci/container_smoke.py:/checks/container_smoke.py:ro" \
+              --volume "$GITHUB_WORKSPACE/tests/container_smoke.py:/checks/container_smoke.py:ro" \
               --entrypoint python "cfipdesk-ci:$ARCH" /checks/container_smoke.py "$mode" "$ARCH"
           done
           docker volume rm "$volume"

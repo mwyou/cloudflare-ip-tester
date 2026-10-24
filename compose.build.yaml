@@ -1,8 +1,0 @@
-# Optional source build: docker compose -f compose.yaml -f compose.build.yaml up -d --build
-services:
-  cfst-dns:
-    build: .
-    image: cfipdesk-cfst:3.1
-  cfst-tools:
-    build: .
-    image: cfipdesk-cfst:3.1

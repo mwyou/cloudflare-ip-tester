@@ -1,95 +1,106 @@
-# Cloudflare 优选 IP 测试台
+# Cloudflare 优选 IP（Docker）
 
-**Docker 自动维护模式**：部署时填写域名和 API Token，调用官方 CFST（初始 v2.3.5）优选三个 IP 并同步 DNS；每小时从 Cloudflare 重读并检查，延迟 ≤ 100 ms 且带宽 > 30 Mbps 时保留，任一不达标则重新优选。重选时将原始三个与新优选前三名合并去重、统一复测排序，再将达标的最终前三名写入 DNS。页面支持分别启动“读取 DNS、检测当前 IP、优选新 IP、合并复测、写入 DNS”，手动步骤不自动继续后续步骤；与定时任务串行执行。支持 DNS 批量更新、失败保留原记录。完整步骤见 [DOCKER.md](DOCKER.md)，部署入口为 `compose.yaml`。以下章节介绍原有的本地手动测速模式，两者的后端算法不同。
+使用官方 CloudflareSpeedTest（CFST）维护指定域名的三个 IP，支持 Linux amd64、arm64。
 
-CFST 二进制保存在独立的 `cfst-bin` 数据卷，初始版本 v2.3.5；支持指定版本独立升级、校验和回滚，重建网站镜像会保留卷内已选定版本。命令见 [CFST 独立升级与回滚](DOCKER.md#cfst-独立升级与回滚)。
+- [源码](https://github.com/mwyou/cloudflare-ip-tester)
+- [Docker Hub 镜像](https://hub.docker.com/r/cotelforce/cloudflare-ip-tester)
 
-默认使用 Docker Hub 镜像 `cotelforce/cloudflare-ip-tester:3.1.0`。配置 `.env` 中的域名和 Token 后，执行 `docker compose up -d` 即可部署；可用 `CFIP_IMAGE` 指定其他镜像版本。需要源码构建时使用 `docker compose -f compose.yaml -f compose.build.yaml up -d --build`。GitHub 自动测试及 Docker Hub 双架构镜像发布见 [PUBLISH.md](PUBLISH.md)。
+## 部署
 
-本地运行的中文测速网站。读取 Cloudflare 控制台中指定域名的 A / AAAA 记录，勾选候选 IP，逐个下载测速，实时查看进度并导出结果。使用 Python 标准库和原生 HTML/CSS/JS，无第三方依赖、数据库或付费接口。
+安装 Docker 和 Compose v2，下载 [compose.yaml](https://raw.githubusercontent.com/mwyou/cloudflare-ip-tester/main/compose.yaml) 到一个部署目录。所有配置直接写在该文件中，必填项为：
 
-## 启动
-
-需要 Python 3.10 或更高版本，不需要安装第三方依赖：
-
-```powershell
-cd F:\codex\daily\cloudflare-ip-tester
-python .\app.py
+```yaml
+environment:
+  CF_DOMAIN: "你的完整优选域名"
+  CF_API_TOKEN: "你的CloudflareToken"
 ```
 
-然后打开 <http://127.0.0.1:8787>。也可以双击 `start.bat`，或运行 `run.ps1`。
+Token 需要目标 Zone 的 DNS Read、DNS Edit；自动查找 Zone 时还需 Zone Read。也可以在 `CF_ZONE_ID` 填入 Zone ID。
 
-端口被占用时可改用 `python app.py --port 8790`。按 Ctrl+C 关闭前台服务。
+启动：
 
-## 使用步骤
-
-1. 填入候选 IP 的域名和 API Token，域名没有预设值。
-2. 点击“读取 DNS 中的 IP”，后端自动从子域逐级查找父域 Zone；也可手动填 Zone ID。
-3. 勾选准备测试的 IP，取消勾选已淘汰的地址。
-4. 选择下载 URL、1～3 轮测试、5～30 秒单次时限，点击“开始测速”。
-5. 结果逐轮更新并按速度排序，可以停止任务、导出选中 IP 的 TXT 或测速结果 CSV。
-
-**域名是获取候选 IP 的来源，下载 URL 是测速文件来源，两个设置互相独立。** 优选域名只存 A 记录也能使用，无需自己提供 HTTP 服务。
-
-## API Token 权限
-
-建议创建一个只读 API Token，至少需要：
-
-- `Zone - Zone - Read`（不填写 Zone ID 时用于查找 Zone）
-- `Zone - DNS - Read`
-
-如果手动填写正确的 Zone ID，可以不授予 Zone 查询权限，但仍需要 DNS Read。
-
-使用 API Token（Bearer），不支持 Global API Key + 邮箱。将 Token 权限和资源范围限制到所需 Zone。权限可参考 [Cloudflare 官方权限表](https://developers.cloudflare.com/fundamentals/api/reference/permissions/)。
-
-Token 仅在读取记录请求中转发到 Cloudflare 官方 API；不存入文件、日志、浏览器存储、结果快照或测速任务。读取成功后页面清空 Token。后端记录和结果仅保存在内存中，约 30 分钟过期；重启服务会清空。页面刷新不会恢复上次任务，因此运行中请保持页面打开。
-
-默认只监听 `127.0.0.1`，检查 Host / Origin，写入接口要求同源自定义请求头；任务和 DNS 快照按临时会话隔离。不建议直接将本地标准库服务器代理到公网。公开部署需另做登录、HTTPS、资源配额和服务管理。
-
-## 测速地址
-
-默认地址是：
-
-```text
-https://speed.cloudflare.com/__down?bytes=10000000
+```sh
+docker compose pull
+docker compose up -d
 ```
 
-也可以使用自己的测速文件 URL，例如：
+在部署机器上访问 <http://127.0.0.1:8789>。远程服务器可先执行 `ssh -L 8789:127.0.0.1:8789 user@server`，再在本机打开此地址。
 
-```text
-https://cf.example.com/speed/100mb.bin
+镜像版本在 `compose.yaml` 的第一处 `image` 中修改，维护工具共用同一镜像。修改配置后执行 `docker compose up -d`；更新镜像先执行 `docker compose pull`。部署机器上填好凭据的 Compose 文件请保留在本机。
+
+## 运行逻辑
+
+1. 启动时优选新前三名，与原有 IP 合并去重，统一复测后选出达标的最终三个 IP。将 `INITIAL_SELECT` 改为 `"false"` 可在启动时先检测已有 IP。
+2. 每小时从 Cloudflare 读取当前记录，检测 TCP 平均延迟和下载带宽。全部满足 **延迟 ≤ 100 ms、带宽 > 30 Mbps** 就保留。
+3. 任一 IP 不达标时，重新优选新前三名，与旧 IP 合并去重、统一复测，按下载速度降序、同速按延迟升序选择最终三个。旧 IP 仍可入选。
+4. 只有最终凑齐三个合格 IP 才同步目标域名的 A 记录，灰云、TTL 60 秒。其他名称和记录类型保留；`RECORD_TYPE` 可改为 `"AAAA"`。
+5. 测速或 API 报错、合格 IP 不足时保留原 DNS；429 限流时结束本周期，等待下次检查。
+
+页面中的“读取 DNS、检测当前 IP、优选新 IP、合并复测、写入 DNS”可单独启动，不会自动继续下一步。手动步骤与定时任务共用执行锁；待写入结果有效期 30 分钟，写入前再次核对 DNS 快照。
+
+默认从 Cloudflare 网段均衡抽样 128 个候选，初选最多下载测试 20 个；最终合并阶段复测全部通过延迟筛选的新旧候选。测速使用部署机器的出口，真实下载会消耗流量。CFST CSV 的速度按 MiB/s 换算为 Mbps 后比较。
+
+参数都在 `compose.yaml` 中。需要自定义候选时，创建 `config/candidates.txt`，每行一个 Cloudflare IP，设置 `CANDIDATE_FILE: "/config/candidates.txt"` 并启用文件内的 `./config:/config:ro` 挂载。候选为 3～512 个去重 IP，不接受 CIDR。
+
+## 状态与数据
+
+```sh
+docker compose ps
+docker compose logs --tail=100
+docker compose down
 ```
 
-测速 URL 的域名用于 TLS SNI、证书验证和 HTTP Host；实际 TCP 连接强制拨到你勾选的候选 IP，不使用测速 URL 的普通 DNS 结果。测速请求不会携带 Cloudflare API Token，不会跟随重定向。
+`cfst-data` 保存状态，`cfst-bin` 保存 CFST 二进制。更新容器保留这两个命名卷；迁移时保持部署目录或 Compose 项目名，并保留原有卷。`docker compose down -v` 会删除两者。
 
-如果测速源返回 429，立即停止整项任务并显示限流，保留已完成结果；未测 IP 不记成慢速，不会自动轮换 IP 重试限流请求。403、重定向、证书失败、网页/JSON 响应、过小文件不会作为有效速度。请使用稳定的直接下载地址。
+## CFST 升级
 
-## 测速口径
+CFST 独立保存在 `/opt/cfst`，首次初始化为官方 v2.3.5。更新网站镜像保留卷内选定的版本。
 
-- **串行下载**：一次只有一个 IP 下载文件，避免多个候选争用带宽。每轮按 IP 列表完整测试，再进入下一轮。
-- **下载速度**：有效文件字节 / 接收文件正文耗时，使用十进制 MB/s（1,000,000 字节/秒），不含 TCP/TLS 建连和响应头等待时间。不会统计 chunked 传输的分块标记。
-- **平均速度**：仅对有效轮次取算术平均，失败轮次保留状态而非当作 0。表格显示有效轮数，避免把 1/3 成功当作三轮稳定。
-- **首字节**：从开始连接到收到 HTTP 响应头的时间；每轮内部同时记录 TCP、TLS 建连时间。
-- **单次时限**：包含连接、TLS、等待响应、下载。已接收至少 64 KiB 时，限时结束可作为带“限时采样”标记的部分样本；取消的轮次不计入排名。
-- **短样本**：少于 5 MB 或正文下载短于 2 秒会显示标记。高速线路可手动改用更大的自有文件，降低短样本波动。
+查看当前版本：
 
-## 限制
-
-- 最多载入 100 个去重 IP，支持分页；不会展开 CNAME。
-- 仅允许测试本次从 API 获取的、位于 Cloudflare 官方代理网段的公网 IP，其他地址显示但跳过。网段列表来源为 [Cloudflare IP Ranges](https://www.cloudflare.com/ips/)，后续网段变化需更新 `cloudflare.py`。
-- 支持 IPv4 和 IPv6；本机没有 IPv6 出站线路时，对应记录会显示连接失败。
-- 橙云记录读取的是控制台的记录内容，不是公共 DNS 查询返回的边缘 IP；界面会标明。
-- 一次只允许运行一个任务，最多 3 轮，单次最多 30 秒 / 100 MB。
-- 测试在 Python 后端发起；本机代理/TUN、出口路由会影响结果。不是浏览器访问者的远程测速，也未内置 XIU2 的 CFST 二进制，数值不保证与 CFST 的采样算法一致。
-- 这是 Python 后端网站，不能直接当作静态 Pages 网站上传。需要运行 Python 的本机或服务器。部署在 Cloudflare 边缘也无法代表你的宽带线路。
-
-## 验证
-
-```powershell
-python -m unittest -v test_app.py
-node --check static/app.js
+```sh
+docker compose run --rm --no-deps cfst-tools status
 ```
 
-离线回归测试使用本地 HTTP 文件服务及模拟 Cloudflare 响应，覆盖分块计数、完整/中断下载、错误状态、时限、取消、Zone 父域查找、分页、会话和请求来源检查，不需要真实 Token。
+升级前停止主服务，将版本和哈希替换为实际值。SHA-256 对应官方 `cfst_linux_amd64.tar.gz` 或 `cfst_linux_arm64.tar.gz` 整个归档文件：
 
-可选界面测试夹具：`python test_app.py --preview` 在 8788 端口提供**模拟**记录与速度。仅供开发验证，Token 为 `ui-fixture-token`，不会请求 Cloudflare。正常启动 `app.py` 不包含此模式，也不会导入测试代码。
+```sh
+docker compose stop cfst-dns
+docker compose run --rm --no-deps cfst-tools upgrade --version vX.Y.Z --sha256 填写64位SHA256
+docker compose up -d cfst-dns
+```
+
+升级会校验哈希、架构、命令参数，并通过回环 HTTP 检查下载、CSV 和 429 输出；失败保留旧版本，不访问 Cloudflare API 或修改 DNS。
+
+回滚：
+
+```sh
+docker compose stop cfst-dns
+docker compose run --rm --no-deps cfst-tools rollback
+docker compose up -d cfst-dns
+```
+
+## 源码与发布
+
+仓库仅包含 Docker 版：`app/` 为服务及页面，`docker/` 为构建辅助程序，`tests/` 为相关测试，`.github/workflows/` 为自动测试和镜像发布。
+
+本地构建：
+
+```sh
+docker build -t cfipdesk-cfst:local .
+```
+
+然后将 `compose.yaml` 第一处 `image` 改为 `cfipdesk-cfst:local`，执行 `docker compose up -d`。Compose 配置不进入镜像构建上下文。
+
+GitHub 推送 `main` 会运行测试和双架构容器检查；推送 `v主版本.次版本.修订版本` 标签会发布版本镜像和 `latest`。发布使用仓库变量 `DOCKERHUB_USERNAME`、`DOCKERHUB_IMAGE` 和 Secret `DOCKERHUB_TOKEN`，当前仓库已配置。
+
+离线测试：
+
+```sh
+PYTHONPATH=app python -m unittest discover -s tests -p 'test_*.py' -v
+node --check app/static/auto.js
+```
+
+可设置 `CFST_TEST_BIN` 为官方 CFST 路径，启用真实二进制的回环下载和升级兼容性测试。测试无需 Cloudflare 凭据，不写公网 DNS。
+
+CFST 的许可及对应源码见 [THIRD_PARTY.md](THIRD_PARTY.md) 和 [LICENSE-CFST](LICENSE-CFST)。

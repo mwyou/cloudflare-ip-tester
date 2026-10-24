@@ -1,21 +1,43 @@
 services:
   cfst-dns:
-    image: "${CFIP_IMAGE:-cotelforce/cloudflare-ip-tester:3.1.0}"
+    # 修改这里的版本即可；cfst-tools 共用此镜像
+    image: &cfst-image cotelforce/cloudflare-ip-tester:3.1.1
     restart: unless-stopped
     init: true
     stop_grace_period: 30s
     ports:
-      - "127.0.0.1:${WEB_PORT:-8789}:8787"
-    env_file:
-      - .env
+      - "127.0.0.1:8789:8787"
     environment:
-      CF_DOMAIN: "${CF_DOMAIN:?请先在 .env 填写优选域名 CF_DOMAIN}"
+      # 必填：完整优选域名，以及该 Zone 的 Cloudflare API Token
+      CF_DOMAIN: ""
+      CF_API_TOKEN: ""
+      # 可选：填 Zone ID 后，Token 可省略 Zone Read 权限
+      CF_ZONE_ID: ""
+
+      MAX_LATENCY_MS: "100"
+      MIN_BANDWIDTH_MBPS: "30"
+      CHECK_INTERVAL_SECONDS: "3600"
+      RECORD_TYPE: "A"
+      DNS_TTL: "60"
+      INITIAL_SELECT: "true"
+
+      CANDIDATE_COUNT: "128"
+      DOWNLOAD_COUNT: "20"
+      CFST_THREADS: "8"
+      DOWNLOAD_SECONDS: "10"
+      CFST_URL: "https://speed.cloudflare.com/__down?bytes=200000000"
+      # 使用自己的 IP 列表时填写 /config/candidates.txt，并启用下面的 config 挂载
+      CANDIDATE_FILE: ""
+
+      # 兼容 Global API Key：清空 CF_API_TOKEN，再填写以下两项
+      # CF_API_KEY: ""
+      # CF_EMAIL: ""
       DATA_DIR: /data
       CFST_HOME: /opt/cfst
     volumes:
       - cfst-data:/data
       - cfst-bin:/opt/cfst
-      - ./config:/config:ro
+      # - ./config:/config:ro
     read_only: true
     tmpfs:
       - /tmp:size=32m,mode=1777
@@ -28,8 +50,9 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
   cfst-tools:
-    image: "${CFIP_IMAGE:-cotelforce/cloudflare-ip-tester:3.1.0}"
+    image: *cfst-image
     profiles: ["tools"]
     command: ["status"]
     environment:
@@ -45,6 +68,7 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+
 volumes:
   cfst-data:
   cfst-bin:
