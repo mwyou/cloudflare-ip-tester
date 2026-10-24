@@ -418,7 +418,7 @@ class Status:
                      "dns_ips": [], "previous_dns_ips": [], "dns_change": None,
                      "results": [], "check_results": [], "selection_results": [], "ranked_results": [],
                      "check_time": None, "selection_time": None, "ranked_time": None,
-                     "selection_candidate_count": None,
+                     "selection_candidate_count": None, "selection_existing_ips": [],
                      "events": [], "steps": {}, "proposed_ips": [],
                      "manual_enabled": False, "busy": False, "active_action": None}
         if path and path.is_file():
@@ -427,7 +427,7 @@ class Status:
                 if previous.get("domain") == settings.domain and previous.get("record_type") == settings.kind:
                     for key in ("events", "last_dns_update", "results", "check_results", "selection_results",
                                 "ranked_results", "check_time", "selection_time", "ranked_time",
-                                "selection_candidate_count",
+                                "selection_candidate_count", "selection_existing_ips",
                                 "dns_ips", "previous_dns_ips", "dns_change"):
                         self.data[key] = previous.get(key, self.data[key])
             except (ValueError, OSError):
@@ -486,7 +486,7 @@ class Maintainer:
         compare_dns_reason = dns_reason if self.records is not None else None
         reasons["compare"] = compare_dns_reason or selection_reason or current_reason
         reasons["write"] = dns_reason or selection_reason or (
-            "先完成去重排序，取得三个 IP" if len(self.final) != 3 else
+            "先完成综合排序，取得三个 IP" if len(self.final) != 3 else
             (None if self.fresh(self.compared_at) else "排序结果已过期，请重新排序"))
         if self.stop.is_set():
             return dict.fromkeys(ACTIONS, "服务已停止")
@@ -566,6 +566,7 @@ class Maintainer:
         self.new_top, self.selected_at = rows, time.time()
         self.complete("select", len(rows))
         self.status.update(results=rows, selection_results=rows, selection_time=time.time(),
+                           selection_existing_ips=self.valid_ips(),
                            selection_candidate_count=candidate_count(pool), phase="select_done",
                            message=f"优选完成：CFST 输出 {len(self.new_top)} 条结果")
         return rows
@@ -588,13 +589,13 @@ class Maintainer:
         self.complete("compare", len(good))
         if len(good) < 3:
             self.status.update(results=ranked, ranked_results=ranked, ranked_time=time.time(), phase="degraded",
-                               message=f"去重排序后只有 {len(good)} 个结果；保留现有 DNS")
+                               message=f"综合排序后只有 {len(good)} 个结果；保留现有 DNS")
             return False
         self.final, self.compared_at = good[:3], time.time()
         for row in self.final:
             row["selected"] = True
         self.status.update(results=ranked, ranked_results=ranked, ranked_time=time.time(), proposed_ips=[r["ip"] for r in self.final],
-                           phase="compare_done", message="去重排序完成，前三名待写入")
+                           phase="compare_done", message="综合排序完成，前三名待写入")
         return True
 
     def write(self):

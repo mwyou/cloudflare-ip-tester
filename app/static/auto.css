@@ -26,7 +26,7 @@ header h1{margin:0;font-size:19px;font-weight:600}
 .steps button.running{opacity:1;border-color:var(--mint);color:var(--mint)}
 .steps small{display:block;font-size:11px;line-height:1.5;color:var(--muted);padding:7px 2px 0;overflow-wrap:anywhere}
 .proposal{font-size:12px;line-height:1.8;color:var(--mint);overflow-wrap:anywhere;margin:0 0 12px}
-.main-grid{display:grid;grid-template-columns:300px minmax(0,1fr);gap:20px}
+.main-grid{display:grid;grid-template-columns:300px minmax(0,1fr);gap:20px;align-items:start}
 .panel{min-width:0;padding:20px}
 .panel-title{display:flex;justify-content:space-between;align-items:center;gap:14px;margin-bottom:15px}
 .panel h2{font-size:15px;font-weight:600;margin:0}
@@ -35,8 +35,8 @@ header h1{margin:0;font-size:19px;font-weight:600}
 .dns-item{font-family:Consolas,monospace;border:1px solid #314452;border-radius:7px;padding:10px 12px;overflow-wrap:anywhere}
 .hint{font-size:12px;color:var(--muted);margin:16px 0 0}
 .muted{color:var(--muted)}
-.table-wrap{overflow-x:auto}
-table{width:100%;border-collapse:collapse;text-align:left;white-space:nowrap}
+.table-wrap{overflow:visible}
+table{width:100%;border-collapse:collapse;text-align:left;table-layout:fixed;overflow-wrap:anywhere}
 th{font-size:12px;color:var(--muted);font-weight:400;padding:8px 12px;border-bottom:1px solid var(--line)}
 td{padding:13px 12px;border-bottom:1px solid #263446;font-size:13px}
 td:first-child{font-family:Consolas,monospace}
@@ -53,8 +53,7 @@ td small{display:block;color:var(--muted);font:11px "Segoe UI",sans-serif}
 .results-panel h3{margin:20px 0 8px;font-size:13px;color:var(--muted)}
 .results-panel h3:first-of-type{margin-top:4px}
 .results-panel h3 small{font-size:11px;font-weight:400}
-.results-panel .table-wrap{max-height:450px;overflow:auto}
-.results-panel th{position:sticky;top:0;background:var(--panel)}
+.results-panel th{background:var(--panel)}
 tr.selected{background:#74dfb910}
 .dns-change{margin-top:18px;padding-top:14px;border-top:1px solid var(--line);font-size:12px;line-height:1.8}
 .dns-change strong{color:var(--mint);font-weight:500}
