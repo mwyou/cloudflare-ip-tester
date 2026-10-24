@@ -539,6 +539,40 @@ class ManualSteps(unittest.TestCase):
             server.shutdown()
             server.server_close()
 
+    def test_remote_dashboard_hosts_and_same_origin_actions(self):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), auto.make_dashboard(self.status, self.controller))
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+
+        def request(host, method="GET", origin=None, extra=None):
+            conn = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+            headers = {"Host": host, "Content-Type": "application/json", "X-Local-Client": "cfst-dashboard"}
+            if origin is not None:
+                headers["Origin"] = origin
+            try:
+                conn.request(method, "/api/actions" if method == "POST" else "/api/status",
+                             '{"action":"read"}' if method == "POST" else None, headers | (extra or {}))
+                response = conn.getresponse()
+                response.read()
+                return response.status
+            finally:
+                conn.close()
+
+        for host in ("192.168.1.10:18789", "203.0.113.10:18789", "[2001:db8::10]:18789", "tester.example.com", "nas:18789"):
+            with self.subTest(host=host):
+                self.assertEqual(request(host), 200)
+                for scheme in ("http://", "https://"):
+                    self.assertEqual(request(host, "POST", scheme + host), 202)
+                    self.controller.worker.join(3)
+                self.assertEqual(request(host, "POST", "http://other.example.com"), 403)
+                self.assertEqual(request(host, "POST", "http://" + host,
+                                         {"Sec-Fetch-Site": "cross-site"}), 403)
+        for host in ("", "user@server:18789", "server/path", "server:0", "server:65536", "server:",
+                     "[::1]extra", "bad host", "server?query", "server#fragment", "bad%20host"):
+            with self.subTest(invalid_host=host):
+                self.assertEqual(request(host), 403)
+
     def test_preview_rejects_even_protected_action(self):
         server = ThreadingHTTPServer(("127.0.0.1", 0), auto.make_dashboard(self.status))
         threading.Thread(target=server.serve_forever, daemon=True).start()

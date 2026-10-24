@@ -656,26 +656,47 @@ class TaskController:
 
 def make_dashboard(status, controller=None):
     class Dashboard(BaseHTTPRequestHandler):
-        def local_request(self, mutation=False):
+        def valid_request(self, mutation=False):
             host = self.headers.get("Host", "")
             try:
                 parsed = urlsplit("http://" + host)
-                valid = (len(self.headers.get_all("Host", [])) == 1 and parsed.hostname in ("127.0.0.1", "localhost", "::1")
+                hostname = parsed.hostname or ""
+                try:
+                    ipaddress.ip_address(hostname)
+                    valid_hostname = True
+                except ValueError:
+                    valid_hostname = (len(hostname) <= 253 and all(re.fullmatch(
+                        r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+                        for label in hostname.rstrip(".").split(".")))
+                valid = (len(self.headers.get_all("Host", [])) == 1 and valid_hostname
+                         and re.fullmatch(r"(?:\[[0-9a-fA-F:.]+\]|[a-zA-Z0-9.-]+)(?::[0-9]{1,5})?", host)
                          and not parsed.username and not parsed.password and not parsed.path and not parsed.query
                          and not parsed.fragment and (parsed.port is None or 1 <= parsed.port <= 65535))
             except ValueError:
                 valid = False
             if not valid:
-                self.send_json(403, {"error": "仅允许通过本机地址访问"})
+                self.send_json(403, {"error": "访问地址格式无效"})
                 return False
-            if mutation and (self.headers.get("Origin") not in (None, "http://" + host) or
+            origin = self.headers.get("Origin")
+            if mutation and ((origin is not None and origin.lower() not in ("http://" + host.lower(), "https://" + host.lower())) or
+                             len(self.headers.get_all("Origin", [])) > 1 or
                              self.headers.get("Sec-Fetch-Site") == "cross-site" or
                              self.headers.get("X-Local-Client") != "cfst-dashboard"):
-                self.send_json(403, {"error": "请从本地页面启动步骤"})
+                self.send_json(403, {"error": "请从管理页面启动步骤"})
                 return False
             return True
 
         def send_body(self, code, body, mime):
+            # Consume small rejected POST bodies before closing, so clients receive
+            # the HTTP error instead of a TCP reset on systems such as Windows.
+            if code >= 400 and self.command == "POST" and not getattr(self, "body_read", False):
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                    if 0 < length <= 1024 and not self.headers.get("Transfer-Encoding"):
+                        self.connection.settimeout(0.5)
+                        self.rfile.read(length)
+                except (ValueError, OSError):
+                    pass
             self.send_response(code)
             for name, value in {"Content-Type": mime, "Content-Length": str(len(body)), "Cache-Control": "no-store",
                                 "X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY",
@@ -691,7 +712,7 @@ def make_dashboard(status, controller=None):
             self.send_body(code, json.dumps(data, ensure_ascii=False).encode(), "application/json; charset=utf-8")
 
         def do_POST(self):
-            if not self.local_request(mutation=True):
+            if not self.valid_request(mutation=True):
                 return
             if self.path not in ("/api/actions", "/api/cfst"):
                 self.send_json(404, {"error": "接口不存在"})
@@ -704,7 +725,9 @@ def make_dashboard(status, controller=None):
                 if not 0 < length <= 1024 or self.headers.get("Transfer-Encoding"):
                     raise ValueError()
                 self.connection.settimeout(5)
-                data = json.loads(self.rfile.read(length))
+                body = self.rfile.read(length)
+                self.body_read = True
+                data = json.loads(body)
                 if not isinstance(data, dict):
                     raise ValueError()
                 if self.path == "/api/actions":
@@ -733,7 +756,7 @@ def make_dashboard(status, controller=None):
             self.send_json(202, {"accepted": data["action"]})
 
         def do_GET(self):
-            if not self.local_request():
+            if not self.valid_request():
                 return
             if self.path == "/api/status":
                 self.send_json(200, controller.snapshot() if controller else status.snapshot())

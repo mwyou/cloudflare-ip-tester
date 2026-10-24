@@ -24,7 +24,7 @@ docker compose pull
 docker compose up -d
 ```
 
-在部署机器上访问 <http://127.0.0.1:8789>。远程服务器可先执行 `ssh -L 8789:127.0.0.1:8789 user@server`，再在本机打开此地址。
+端口映射为 `18789:8787`，监听宿主机所有网络接口。在浏览器访问 `http://服务器IP:18789`，部署机器本机也可访问 <http://127.0.0.1:18789>。Web 支持通过 IP 或域名访问，操作接口保留同源校验。
 
 Compose 只运行一个服务。网站镜像版本在 `image` 中修改，CFST 版本在 Web 页面管理。修改配置后执行 `docker compose up -d`；更新镜像先执行 `docker compose pull`。部署机器上填好凭据的 Compose 文件请保留在本机。
 

@@ -168,13 +168,14 @@ class WebCFSTTests(unittest.TestCase):
                 return response.status, json.loads(response.read())
             finally:
                 conn.close()
-        for extra in ({'Origin':'https://evil.example'}, {'Host':'evil.example'}, {'X-Local-Client':''}):
+        for extra in ({'Origin':'https://evil.example'}, {'Host':'bad/host'}, {'X-Local-Client':''}):
             self.assertEqual(request({'action':'rollback'}, extra)[0], 403)
         for payload in ({'action':'install','version':'../../bad'}, {'action':'switch','release_id':'/bin/sh'},
                         {'action':'install','version':'v2.3.6','url':'https://evil.example'},
                         {'action':'rollback','extra':1}, {'action':['rollback']}):
             self.assertEqual(request(payload)[0], 400)
-        self.assertEqual(request({'action':'switch','release_id':self.target})[0], 202)
+        self.assertEqual(request({'action':'switch','release_id':self.target},
+                                 {'Host':'tester.example.com:18789','Origin':'http://tester.example.com:18789'})[0], 202)
         self.controller.worker.join(4)
         conn = http.client.HTTPConnection('127.0.0.1', server.server_port)
         conn.request('GET','/api/status')

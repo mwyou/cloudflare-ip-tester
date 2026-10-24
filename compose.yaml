@@ -1,11 +1,11 @@
 services:
   cfst-dns:
-    image: cotelforce/cloudflare-ip-tester:3.2.0
+    image: cotelforce/cloudflare-ip-tester:3.2.1
     restart: unless-stopped
     init: true
     stop_grace_period: 30s
     ports:
-      - "127.0.0.1:8789:8787"
+      - "18789:8787"
     environment:
       CF_DOMAIN: ""       # 填写完整优选域名
       CF_API_TOKEN: ""    # 填写 Cloudflare API Token
