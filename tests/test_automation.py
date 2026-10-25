@@ -530,6 +530,69 @@ class ManualSteps(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(auto.ServiceError):
                 controller.set_interval(value)
 
+    def test_global_settings_validate_before_any_change_and_commit_together(self):
+        self.prepare_final()
+        payload = dict(interval_seconds=120, jitter_min_seconds=10, jitter_max_seconds=30,
+                       max_latency_ms=70, min_bandwidth_mbps=60, dns_record_count=2, dns_history_count=1)
+        self.status.update(dns_history=[{"ips": IPS, "time": 10}, {"ips": NEW, "time": 5}])
+        before = self.status.snapshot()
+        cfg = self.service.cfg
+        with patch.object(auto.random, "randint", return_value=20) as sample:
+            with self.assertRaises(auto.ServiceError):
+                self.controller.set_settings(**(payload | {"dns_history_count": 11}))
+            self.assertEqual(self.status.snapshot(), before)
+            self.assertEqual(self.service.cfg, cfg)
+            self.assertEqual(self.service.record_count, 3)
+            self.assertIsNone(self.controller.next_check)
+            sample.assert_not_called()
+            self.controller.set_settings(**payload)
+            sample.assert_called_once_with(10, 30)
+        state = self.status.snapshot()
+        self.assertEqual({key: state[key] for key in payload}, payload)
+        self.assertEqual(len(state["dns_history"]), 1)
+        self.assertEqual(state["steps"]["check"]["count"], 0)
+        self.assertAlmostEqual(state["next_run"] - time.time(), 140, delta=1)
+        self.assertEqual(self.service.runner.settings, self.service.cfg)
+        self.assertEqual(self.service.record_count, 2)
+        self.client.replace.assert_not_called()
+
+    def test_global_save_without_schedule_change_preserves_deadline(self):
+        self.controller.set_schedule(120, 10, 20)
+        deadline, timestamp = self.controller.next_check, self.status.snapshot()["next_run"]
+        payload = {key: self.status.snapshot()[key] for key in auto.SETTING_FIELDS}
+        payload.update(max_latency_ms=80, dns_history_count=4)
+        with patch.object(auto.random, "randint") as sample:
+            self.controller.set_settings(**payload)
+            self.controller.set_settings(**payload)
+            sample.assert_not_called()
+        self.assertEqual(self.controller.next_check, deadline)
+        self.assertEqual(self.status.snapshot()["next_run"], timestamp)
+        self.controller.reserve("automatic")
+        try:
+            with self.assertRaises(auto.ServiceError):
+                self.controller.set_settings(**(payload | {"dns_record_count": 8}))
+            self.assertEqual(self.service.record_count, payload["dns_record_count"])
+        finally:
+            self.controller.lock.release()
+
+    def test_summary_revisions_follow_relevant_changes_and_server_restart(self):
+        self.prepare_final()
+        before = self.controller.snapshot(summary=True)
+        self.assertTrue(auto.SUMMARY_EXCLUDED.isdisjoint(before))
+        self.assertEqual(before["revisions"], self.controller.snapshot()["revisions"])
+        self.status.update(phase="checking", busy=True)
+        self.assertEqual(before["revisions"], self.controller.snapshot(summary=True)["revisions"])
+        self.status.update(dns_ips=NEW)
+        changed = self.controller.snapshot(summary=True)["revisions"]
+        self.assertEqual([key for key in changed if before["revisions"][key] != changed[key]], ["dns"])
+        self.status.update(dns_ips=list(NEW))
+        self.assertEqual(changed, self.status.snapshot(summary=True)["revisions"])
+        self.status.update(message="Testing", check_results=[row(IPS[0], latency=50)])
+        latest = self.status.snapshot()["revisions"]
+        self.assertEqual({key for key in latest if latest[key] != changed[key]}, {"check", "events"})
+        restarted = auto.Status(None, self.cfg).snapshot(summary=True)
+        self.assertTrue(all(latest[key] != restarted["revisions"][key] for key in latest))
+
     def test_dns_record_count_can_be_changed_at_runtime(self):
         controller = auto.TaskController(self.service)
         controller.set_record_count(6)
@@ -623,6 +686,13 @@ class ManualSteps(unittest.TestCase):
                 conn.close()
         for payload in ({"dns_history_count": 4}, {"jitter_min_seconds": 1, "jitter_max_seconds": 10000}):
             self.assertEqual(request(payload), 202)
+        full_settings = {key: self.status.snapshot()[key] for key in auto.SETTING_FIELDS}
+        self.assertEqual(request(full_settings | {"interval_seconds": 180}), 202)
+        self.assertEqual(self.service.cfg.interval, 180)
+        self.assertEqual(request(full_settings | {"dns_record_count": True}), 400)
+        self.assertEqual(request(full_settings | {"dns_history_count": -1}), 409)
+        self.assertEqual(self.service.cfg.interval, 180)
+        self.assertEqual(request({}, "/api/status/summary", "GET"), 200)
         self.assertEqual(self.status.snapshot()["dns_history_count"], 4)
         self.assertEqual(self.status.snapshot()["jitter_max_seconds"], 10000)
         for payload in ({"jitter_min_seconds": 1}, {"dns_history_count": True},

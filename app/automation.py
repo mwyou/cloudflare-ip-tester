@@ -40,6 +40,19 @@ MAX_HISTORY_COUNT = 10
 MIN_JITTER_SECONDS = 1
 MAX_JITTER_SECONDS = 10000
 ACTIONS = ("read", "check", "select", "compare", "write")
+SETTING_FIELDS = {"interval_seconds", "jitter_min_seconds", "jitter_max_seconds",
+                  "max_latency_ms", "min_bandwidth_mbps", "dns_record_count", "dns_history_count"}
+STATUS_SECTIONS = {
+    "settings": SETTING_FIELDS,
+    "dns": {"dns_ips", "dns_history", "dns_history_count", "last_dns_update"},
+    "check": {"check_results", "check_time", "single_results", "max_latency_ms", "min_bandwidth_mbps"},
+    "selection": {"selection_results", "selection_existing_ips", "selection_candidate_count", "selection_time",
+                  "single_results", "max_latency_ms", "min_bandwidth_mbps"},
+    "ranked": {"ranked_results", "ranked_time", "proposed_ips", "single_results", "max_latency_ms", "min_bandwidth_mbps"},
+    "events": {"events"},
+}
+SUMMARY_EXCLUDED = {"results", "check_results", "selection_results", "ranked_results", "single_results",
+                    "dns_ips", "dns_history", "selection_existing_ips", "proposed_ips", "events"}
 
 
 def valid_jitter(minimum, maximum):
@@ -429,6 +442,8 @@ def candidate_pool(settings, existing):
 class Status:
     def __init__(self, path, settings):
         self.path, self.lock = path, threading.RLock()
+        self.instance = secrets.token_hex(8)
+        self.revisions = dict.fromkeys(STATUS_SECTIONS, 0)
         self.data = {"domain": settings.domain, "record_type": settings.kind, "engine": "CFST " + settings.cfst_version,
                      "max_latency_ms": settings.latency_ms, "min_bandwidth_mbps": settings.min_mbps,
                      "interval_seconds": settings.interval, "phase": "starting", "message": "等待首次检查",
@@ -479,6 +494,12 @@ class Status:
 
     def update(self, **values):
         with self.lock:
+            changed = {key for key, value in values.items() if self.data.get(key) != value}
+            if "message" in values:
+                changed.add("events")
+            for section, fields in STATUS_SECTIONS.items():
+                if changed & fields:
+                    self.revisions[section] += 1
             self.data.update(values)
             if "message" in values:
                 event = {"time": time.time(), "message": values["message"]}
@@ -490,9 +511,11 @@ class Status:
                 temporary.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8")
                 temporary.replace(self.path)
 
-    def snapshot(self):
+    def snapshot(self, summary=False):
         with self.lock:
-            return json.loads(json.dumps(self.data))
+            data = {key: value for key, value in self.data.items() if not summary or key not in SUMMARY_EXCLUDED}
+            data["revisions"] = {key: f"{self.instance}:{value}" for key, value in self.revisions.items()}
+            return json.loads(json.dumps(data))
 
 
 class Maintainer:
@@ -778,8 +801,8 @@ class TaskController:
                                    latency_ms=state["max_latency_ms"], min_mbps=state["min_bandwidth_mbps"])
         self.service.runner.settings = self.service.cfg
 
-    def snapshot(self):
-        data = self.service.status.snapshot()
+    def snapshot(self, summary=False):
+        data = self.service.status.snapshot(summary=summary)
         data["actions"] = self.service.actions()
         if data["busy"]:
             data["actions"] = dict.fromkeys(ACTIONS, "任务运行中")
@@ -856,77 +879,75 @@ class TaskController:
             self.lock.release()
             raise
 
+    def set_settings(self, **values):
+        if not values or not values.keys() <= SETTING_FIELDS:
+            raise ServiceError("运行设置参数无效")
+        if not self.lock.acquire(blocking=False):
+            raise ServiceError("已有任务运行中，请稍后再试")
+        try:
+            state = self.service.status.snapshot()
+            settings = {key: state[key] for key in SETTING_FIELDS} | values
+            interval = settings["interval_seconds"]
+            minimum, maximum = settings["jitter_min_seconds"], settings["jitter_max_seconds"]
+            latency, bandwidth = settings["max_latency_ms"], settings["min_bandwidth_mbps"]
+            count, history_count = settings["dns_record_count"], settings["dns_history_count"]
+            # Validate the whole form before mutating any runtime setting.
+            if type(interval) is not int or not MIN_INTERVAL_SECONDS <= interval <= 86400:
+                raise ServiceError("检查间隔必须在 60 到 86400 秒之间")
+            if not valid_jitter(minimum, maximum):
+                raise ServiceError("随机波动区间必须在 1 到 10000 秒之间，下限不能大于上限；关闭时两项均为 0")
+            if not valid_thresholds(latency, bandwidth):
+                raise ServiceError("延迟需为 1～2000 ms，带宽需为 0.1～10000 Mbps")
+            if type(count) is not int or not MIN_RECORD_COUNT <= count <= MAX_RECORD_COUNT:
+                raise ServiceError(f"DNS 记录数量必须在 {MIN_RECORD_COUNT} 到 {MAX_RECORD_COUNT} 条之间")
+            if type(history_count) is not int or not MIN_HISTORY_COUNT <= history_count <= MAX_HISTORY_COUNT:
+                raise ServiceError(f"旧记录份数必须在 {MIN_HISTORY_COUNT} 到 {MAX_HISTORY_COUNT} 份之间")
+            schedule_changed = any(settings[key] != state[key] for key in
+                                   ("interval_seconds", "jitter_min_seconds", "jitter_max_seconds"))
+            cfg = replace(self.service.cfg, interval=interval, latency_ms=latency, min_mbps=bandwidth)
+            steps = state["steps"]
+            if "check" in steps:
+                steps["check"]["count"] = sum(qualifies(cfg, row) for row in state["check_results"])
+            update = settings | {"steps": steps, "dns_history": state["dns_history"][:history_count],
+                                 "phase": "settings_saved", "message": "运行设置已保存"}
+            deadline = self.next_check
+            if schedule_changed:
+                delay = interval + random.randint(minimum, maximum)
+                deadline = time.monotonic() + delay
+                update["next_run"] = time.time() + delay
+            self.service.status.update(**update)
+            self.service.cfg = cfg
+            self.service.runner.settings = cfg
+            # Unrelated setting saves must not prevent first-read count adoption.
+            if "dns_record_count" in values:
+                self.service.record_count = count
+            self.jitter_min_seconds, self.jitter_max_seconds = minimum, maximum
+            self.next_check = deadline
+            if schedule_changed:
+                self.scheduler_wakeup.set()
+        finally:
+            self.lock.release()
+
     def set_interval(self, seconds):
-        if type(seconds) is not int or not MIN_INTERVAL_SECONDS <= seconds <= 86400:
-            raise ServiceError(f"检查间隔必须在 {MIN_INTERVAL_SECONDS} 到 86400 秒之间")
-        self.set_schedule(seconds, self.jitter_min_seconds, self.jitter_max_seconds)
+        self.set_settings(interval_seconds=seconds)
 
     def set_schedule(self, interval, minimum, maximum):
-        if type(interval) is not int or not MIN_INTERVAL_SECONDS <= interval <= 86400:
-            raise ServiceError("检查间隔必须在 60 到 86400 秒之间")
-        if not valid_jitter(minimum, maximum):
-            raise ServiceError("随机波动区间必须在 1 到 10000 秒之间，下限不能大于上限；关闭时两项均为 0")
-        if not self.lock.acquire(blocking=False):
-            raise ServiceError("已有任务运行中，请稍后再试")
-        try:
-            self.jitter_min_seconds, self.jitter_max_seconds = minimum, maximum
-            self.service.cfg = replace(self.service.cfg, interval=interval)
-            self.service.runner.settings = self.service.cfg
-            delay = interval + self.jitter()
-            self.next_check = time.monotonic() + delay
-            self.service.status.update(interval_seconds=interval, jitter_min_seconds=minimum,
-                                       jitter_max_seconds=maximum, next_run=time.time() + delay,
-                                       message=f"检查计划已更新：固定 {interval} 秒，随机增加 {minimum}～{maximum} 秒")
-            self.scheduler_wakeup.set()
-        finally:
-            self.lock.release()
+        self.set_settings(interval_seconds=interval, jitter_min_seconds=minimum, jitter_max_seconds=maximum)
 
     def set_record_count(self, count):
-        if type(count) is not int or not MIN_RECORD_COUNT <= count <= MAX_RECORD_COUNT:
-            raise ServiceError(f"DNS 记录数量必须在 {MIN_RECORD_COUNT} 到 {MAX_RECORD_COUNT} 条之间")
-        if not self.lock.acquire(blocking=False):
-            raise ServiceError("已有任务运行中，请稍后再试")
-        try:
-            self.service.record_count = count
-            self.service.status.update(dns_record_count=count,
-                                       message=f"DNS 记录数量已改为 {count} 条")
-        finally:
-            self.lock.release()
+        self.set_settings(dns_record_count=count)
 
     def set_history_count(self, count):
-        if type(count) is not int or not MIN_HISTORY_COUNT <= count <= MAX_HISTORY_COUNT:
-            raise ServiceError(f"旧记录份数必须在 {MIN_HISTORY_COUNT} 到 {MAX_HISTORY_COUNT} 份之间")
-        if not self.lock.acquire(blocking=False):
-            raise ServiceError("已有任务运行中，请稍后再试")
-        try:
-            history = self.service.status.snapshot().get("dns_history", [])[:count]
-            self.service.status.update(dns_history_count=count, dns_history=history,
-                                       message=f"旧记录保留份数已改为 {count} 份")
-        finally:
-            self.lock.release()
+        self.set_settings(dns_history_count=count)
 
     def jitter(self):
         return random.randint(self.jitter_min_seconds, self.jitter_max_seconds)
 
     def set_jitter(self, minimum, maximum):
-        self.set_schedule(self.service.cfg.interval, minimum, maximum)
+        self.set_settings(jitter_min_seconds=minimum, jitter_max_seconds=maximum)
 
     def set_thresholds(self, latency_ms, min_mbps):
-        if not valid_thresholds(latency_ms, min_mbps):
-            raise ServiceError("延迟需为 1～2000 ms，带宽需为 0.1～10000 Mbps")
-        if not self.lock.acquire(blocking=False):
-            raise ServiceError("已有任务运行中，请稍后再试")
-        try:
-            self.service.cfg = replace(self.service.cfg, latency_ms=latency_ms, min_mbps=min_mbps)
-            self.service.runner.settings = self.service.cfg
-            state = self.service.status.snapshot()
-            if "check" in state["steps"]:
-                state["steps"]["check"]["count"] = sum(qualifies(self.service.cfg, row) for row in state["check_results"])
-            self.service.status.update(max_latency_ms=latency_ms, min_bandwidth_mbps=min_mbps, steps=state["steps"],
-                                       phase="settings_saved",
-                                       message=f"检测标准已改为延迟 ≤ {latency_ms} ms、带宽 > {min_mbps} Mbps")
-        finally:
-            self.lock.release()
+        self.set_settings(max_latency_ms=latency_ms, min_bandwidth_mbps=min_mbps)
 
     def wait_next(self):
         with self.lock:
@@ -1024,16 +1045,12 @@ def make_dashboard(status, controller=None):
                     if set(data) != {"ip"} or not isinstance(data["ip"], str):
                         raise ValueError()
                 elif self.path == "/api/settings":
-                    if (set(data) == {"interval_seconds"} and type(data["interval_seconds"]) is int) or \
-                       (set(data) == {"dns_record_count"} and type(data["dns_record_count"]) is int) or \
-                       (set(data) == {"dns_history_count"} and type(data["dns_history_count"]) is int) or \
-                       (set(data) == {"max_latency_ms", "min_bandwidth_mbps"} and
-                        type(data["max_latency_ms"]) in (int, float) and
-                        type(data["min_bandwidth_mbps"]) in (int, float)) or \
-                       (set(data) == {"jitter_min_seconds", "jitter_max_seconds"} and
-                        type(data["jitter_min_seconds"]) is int and type(data["jitter_max_seconds"]) is int):
-                        pass
-                    else:
+                    groups = ({"interval_seconds"}, {"dns_record_count"}, {"dns_history_count"},
+                              {"max_latency_ms", "min_bandwidth_mbps"},
+                              {"jitter_min_seconds", "jitter_max_seconds"}, SETTING_FIELDS)
+                    if set(data) not in groups or any(type(value) not in
+                            ((int, float) if key in {"max_latency_ms", "min_bandwidth_mbps"} else (int,))
+                            for key, value in data.items()):
                         raise ValueError()
             except (ValueError, TypeError, OSError):
                 self.send_json(400, {"error": "步骤参数无效"})
@@ -1043,16 +1060,7 @@ def make_dashboard(status, controller=None):
                 return
             try:
                 if self.path == "/api/settings":
-                    if "interval_seconds" in data:
-                        controller.set_interval(data["interval_seconds"])
-                    elif "dns_record_count" in data:
-                        controller.set_record_count(data["dns_record_count"])
-                    elif "dns_history_count" in data:
-                        controller.set_history_count(data["dns_history_count"])
-                    elif "max_latency_ms" in data:
-                        controller.set_thresholds(data["max_latency_ms"], data["min_bandwidth_mbps"])
-                    else:
-                        controller.set_jitter(data["jitter_min_seconds"], data["jitter_max_seconds"])
+                    controller.set_settings(**data)
                 elif self.path == "/api/test-ip":
                     controller.start_test_ip(data["ip"])
                 else:
@@ -1065,8 +1073,9 @@ def make_dashboard(status, controller=None):
         def do_GET(self):
             if not self.valid_request():
                 return
-            if self.path == "/api/status":
-                self.send_json(200, controller.snapshot() if controller else status.snapshot())
+            if self.path in ("/api/status", "/api/status/summary"):
+                summary = self.path.endswith("/summary")
+                self.send_json(200, controller.snapshot(summary=summary) if controller else status.snapshot(summary=summary))
                 return
             elif self.path == "/health":
                 body, mime = b'{"ok":true}', "application/json"

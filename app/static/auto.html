@@ -23,13 +23,12 @@
       <article><p>下一次检查</p><strong id="next">—</strong><small id="last">等待首次运行</small></article>
       <article class="featured"><p>运行状态</p><strong id="phase">连接中</strong></article>
     </section>
-    <section class="panel settings-panel" aria-label="运行设置">
-      <div class="panel-title"><h2>运行设置</h2><span class="hint">设置保存在当前容器</span></div>
+    <form class="panel settings-panel" id="settings-form" aria-label="运行设置">
+      <div class="panel-title"><h2>运行设置</h2><div class="settings-save"><span class="hint" id="settings-status" role="status">设置保存在当前容器</span><button type="submit" id="settings-save" disabled>保存设置</button></div></div>
       <div class="settings-grid">
         <div class="setting">
           <label for="interval-minutes">检查间隔</label>
-          <div class="setting-controls"><input id="interval-minutes" type="number" min="1" max="1440" step="1" disabled><span>分钟</span><button type="button" id="interval-save" disabled>保存</button></div>
-          <p class="hint" id="interval-status" role="status"></p>
+          <div class="setting-controls"><input id="interval-minutes" type="number" min="1" max="1440" step="1" required disabled><span>分钟</span></div>
         </div>
         <div class="setting jitter-setting">
           <div class="setting-title"><span>随机波动</span><label class="jitter-switch" for="jitter-enabled"><input id="jitter-enabled" type="checkbox" disabled>启用</label></div>
@@ -43,31 +42,28 @@
               </div>
               <div class="range-scale"><span>1 s</span><span>10000 s</span></div>
             </div>
-            <button type="button" id="jitter-save" disabled>保存</button>
           </div>
-          <p class="hint" id="jitter-status" role="status">在检查间隔上随机增加时间</p>
+          <p class="hint">在检查间隔上随机增加时间</p>
         </div>
         <div class="setting threshold-setting">
           <label for="max-latency">检测标准</label>
           <div class="threshold-controls">
-            <label for="max-latency"><span>延迟 ≤</span><input id="max-latency" type="number" min="1" max="2000" step="0.1" disabled><span>ms</span></label>
-            <label for="min-bandwidth"><span>带宽 &gt;</span><input id="min-bandwidth" type="number" min="0.1" max="10000" step="0.1" disabled><span>Mbps</span></label>
-            <button type="button" id="threshold-save" disabled>保存</button>
+            <label for="max-latency"><span>延迟 ≤</span><input id="max-latency" type="number" min="1" max="2000" step="0.1" required disabled><span>ms</span></label>
+            <label for="min-bandwidth"><span>带宽 &gt;</span><input id="min-bandwidth" type="number" min="0.1" max="10000" step="0.1" required disabled><span>Mbps</span></label>
           </div>
-          <p class="hint" id="threshold-status" role="status"></p>
         </div>
         <div class="setting">
           <label for="dns-record-count">DNS 记录数量</label>
-          <div class="setting-controls"><input id="dns-record-count" type="number" min="1" max="10" step="1" disabled><span>条</span><button type="button" id="dns-record-count-save" disabled>保存</button></div>
-          <p class="hint" id="dns-record-count-status" role="status"></p>
+          <div class="setting-controls"><input id="dns-record-count" type="number" min="1" max="10" step="1" required disabled><span>条</span></div>
+          <p class="hint">1～10 条</p>
         </div>
         <div class="setting">
           <label for="dns-history-count">旧记录份数</label>
-          <div class="setting-controls"><input id="dns-history-count" type="number" min="0" max="10" step="1" disabled><span>份</span><button type="button" id="dns-history-count-save" disabled>保存</button></div>
-          <p class="hint" id="dns-history-count-status" role="status">0 表示不保留</p>
+          <div class="setting-controls"><input id="dns-history-count" type="number" min="0" max="10" step="1" required disabled><span>份</span></div>
+          <p class="hint">0 表示不保留</p>
         </div>
       </div>
-    </section>
+    </form>
     <section class="panel actions-panel" aria-label="单步操作">
       <div class="panel-title"><h2>单步操作</h2></div>
       <div class="steps">
