@@ -1,0 +1,36 @@
+name: Clean old Docker Hub versions
+
+on:
+  workflow_dispatch:
+    inputs:
+      keep_version:
+        description: 'Published version to keep together with latest (e.g. 3.2.19)'
+        required: true
+        type: string
+      apply:
+        description: 'Delete the listed older version tags; false only previews'
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+# Do not remove tags while a new image is being published.
+concurrency:
+  group: dockerhub-publish
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Verify current image and clean older tags
+        env:
+          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          KEEP_VERSION: ${{ inputs.keep_version }}
+          APPLY: ${{ inputs.apply }}
+        run: python .github/scripts/cleanup_versions.py

@@ -41,6 +41,7 @@ class AutomationTests(unittest.TestCase):
         self.status = auto.Status(None, self.cfg)
         self.client = Mock()
         self.client.records.return_value = records()
+        self.client.replace.side_effect = lambda before, ips: records(ips)
         self.runner = Mock()
         self.service = auto.Maintainer(self.cfg, self.client, self.runner, self.status, self.stop)
 
@@ -457,6 +458,7 @@ class ManualSteps(unittest.TestCase):
         self.status = auto.Status(None, self.cfg)
         self.client = Mock()
         self.client.records.return_value = records()
+        self.client.replace.side_effect = lambda before, ips: records(ips)
         self.runner = Mock()
         self.runner.run.return_value = [row(ip, speed=8) for ip in NEW]
         self.stop = threading.Event()
@@ -505,9 +507,9 @@ class ManualSteps(unittest.TestCase):
         self.run_step("write")
         self.assertEqual(self.runner.run.call_count, 2)
         self.client.replace.assert_called_once_with(records(), NEW)
-        self.assertEqual(self.status.snapshot()["proposed_ips"], [])
-        with self.assertRaises(auto.ServiceError):
-            self.controller.start("write")
+        self.assertEqual(self.status.snapshot()["proposed_ips"], NEW)
+        self.assertTrue(self.status.snapshot()["proposal_applied"])
+        self.assertIsNone(self.controller.snapshot()["actions"]["write"])
 
     def test_selection_can_start_without_reading_dns(self):
         with patch.object(auto, "candidate_pool", return_value=NEW):
@@ -757,8 +759,9 @@ class ManualSteps(unittest.TestCase):
         self.assertEqual(after["check_results"][1:], before["check_results"][1:])
         self.assertEqual(after["selection_results"], before["selection_results"])
         self.assertEqual(after["ranked_results"][0]["ip"], IPS[0])
-        self.assertEqual(after["proposed_ips"], [])
-        self.assertFalse(any(r.get("selected") for r in after["ranked_results"]))
+        self.assertEqual(after["proposed_ips"], [IPS[0], *NEW[:2]])
+        self.assertEqual(sum(r.get("selected", False) for r in after["ranked_results"]), 3)
+        self.assertIsNone(self.controller.snapshot()["actions"]["write"])
         self.assertEqual(after["dns_ips"], before["dns_ips"])
         self.assertEqual(after["single_results"][IPS[0]]["result"]["latency_ms"], 25)
         self.client.replace.assert_not_called()
@@ -838,7 +841,7 @@ class ManualSteps(unittest.TestCase):
         self.controller.start_test_ip(IPS[0])
         self.controller.worker.join(3)
         self.assertEqual(self.status.snapshot()["single_results"][IPS[0]]["error"], "429")
-        self.assertEqual(self.status.snapshot()["proposed_ips"], [])
+        self.assertEqual(self.status.snapshot()["proposed_ips"], NEW)
         self.runner.run.side_effect = None
         self.runner.run.return_value = []
         self.controller.start_test_ip(IPS[0])
@@ -866,25 +869,73 @@ class ManualSteps(unittest.TestCase):
         self.client.records.assert_not_called()
         self.runner.run.assert_not_called()
 
-    def test_expired_dns_selection_and_final_results_refuse_write(self):
+    def test_results_remain_sortable_and_writable_after_a_day(self):
         self.prepare_final()
-        for field in ("read_at", "selected_at", "compared_at"):
-            previous = getattr(self.service, field)
-            setattr(self.service, field, time.time() - auto.STEP_TTL - 1)
-            with self.subTest(field=field), self.assertRaises(auto.ServiceError):
-                self.controller.start("write")
-            setattr(self.service, field, previous)
+        samples = self.runner.run.call_count
+        with patch.object(auto.time, "time", return_value=time.time() + 86400):
+            self.assertIsNone(self.controller.snapshot()["actions"]["compare"])
+            self.assertIsNone(self.controller.snapshot()["actions"]["write"])
+            self.run_step("compare")
+            self.run_step("write")
+        self.assertEqual(self.status.snapshot()["phase"], "updated")
+        self.assertEqual(self.runner.run.call_count, samples)
+        self.client.replace.assert_called_once_with(records(), NEW)
+
+    def test_read_preserves_samples_and_successful_tests_keep_ranking_usable(self):
+        self.prepare_final()
+        before = self.status.snapshot()
+        self.run_step("read")
+        after = self.status.snapshot()
+        for key in ("check_results", "selection_results", "ranked_results", "proposed_ips"):
+            self.assertEqual(before[key], after[key])
+        for action in ("check", "select"):
+            with self.subTest(action=action):
+                self.runner.run.return_value = [row(ip, speed=9) for ip in (IPS if action == "check" else NEW)]
+                self.run_step(action)
+                self.assertEqual(len(self.status.snapshot()["proposed_ips"]), 3)
+                self.assertIsNone(self.controller.snapshot()["actions"]["write"])
         self.client.replace.assert_not_called()
 
-    def test_new_read_check_or_selection_invalidates_proposal(self):
-        for action in ("read", "check", "select"):
-            with self.subTest(action=action):
-                self.prepare_final()
-                self.assertEqual(len(self.status.snapshot()["proposed_ips"]), 3)
-                self.run_step(action)
-                self.assertEqual(self.status.snapshot()["proposed_ips"], [])
-                self.assertIsNotNone(self.controller.snapshot()["actions"]["write"])
+    def test_failed_read_or_test_keeps_last_successful_samples_and_plan(self):
+        self.prepare_final()
+        before = self.status.snapshot()
+        self.client.records.side_effect = auto.ServiceError("read failed")
+        self.run_step("read")
+        self.client.records.side_effect = None
+        self.runner.run.side_effect = auto.ServiceError("test failed")
+        for action in ("check", "select"):
+            self.run_step(action)
+        after = self.status.snapshot()
+        for key in ("check_results", "selection_results", "ranked_results", "proposed_ips"):
+            self.assertEqual(before[key], after[key])
+        self.assertIsNone(self.controller.snapshot()["actions"]["compare"])
+        self.assertIsNone(self.controller.snapshot()["actions"]["write"])
+
+    def test_healthy_automatic_cycle_keeps_selection_and_a_writable_ranking(self):
+        self.prepare_final()
+        old_selection = self.status.snapshot()["selection_results"]
+        self.runner.run.return_value = [row(ip, speed=10) for ip in IPS]
+        self.controller.automatic()
+        self.assertEqual(self.status.snapshot()["phase"], "healthy")
+        self.assertEqual(self.status.snapshot()["selection_results"], old_selection)
+        self.assertEqual(self.status.snapshot()["proposed_ips"], IPS)
+        self.assertIsNone(self.controller.snapshot()["actions"]["write"])
         self.client.replace.assert_not_called()
+
+    def test_record_count_changes_rebuild_visible_selection_without_retesting(self):
+        self.prepare_final()
+        calls = self.runner.run.call_count
+        self.controller.set_record_count(4)
+        state = self.status.snapshot()
+        self.assertEqual(len(state["proposed_ips"]), 4)
+        self.assertEqual(sum(r["selected"] for r in state["ranked_results"]), 4)
+        self.assertIsNone(self.controller.snapshot()["actions"]["write"])
+        self.controller.set_record_count(10)
+        self.assertEqual(self.status.snapshot()["proposed_ips"], [])
+        self.assertIn("不足", self.controller.snapshot()["actions"]["write"])
+        self.controller.set_record_count(3)
+        self.assertIsNone(self.controller.snapshot()["actions"]["write"])
+        self.assertEqual(self.runner.run.call_count, calls)
 
     def test_sorting_does_not_run_a_third_speedtest(self):
         self.prepare_final()
@@ -894,36 +945,79 @@ class ManualSteps(unittest.TestCase):
         self.assertEqual(self.status.snapshot()["proposed_ips"], NEW)
         self.client.replace.assert_not_called()
 
-    def test_failed_api_write_consumes_proposal_and_cannot_retry_blindly(self):
+    def test_write_retry_rereads_dns_and_does_not_duplicate_an_ambiguous_write(self):
         self.prepare_final()
-        self.client.replace.side_effect = auto.ServiceError("timeout")
+        client = auto.CloudflareClient(replace(self.cfg, zone_id="a"*32))
+        # First mutation reached the server, but its response timed out.
+        client.records = Mock(side_effect=[records(), records(), records(NEW), records(NEW), records(NEW)])
+        client.request = Mock(side_effect=auto.ServiceError("timeout"))
+        self.service.client = client
         self.run_step("write")
         self.assertEqual(self.status.snapshot()["phase"], "error")
-        with self.assertRaises(auto.ServiceError):
-            self.controller.start("write")
-        self.assertEqual(self.client.replace.call_count, 1)
+        self.assertEqual(self.status.snapshot()["proposed_ips"], NEW)
+        self.assertIsNone(self.controller.snapshot()["actions"]["write"])
+        self.run_step("write")
+        self.assertEqual(self.status.snapshot()["phase"], "updated")
+        self.assertTrue(self.status.snapshot()["proposal_applied"])
+        self.assertEqual(client.records.call_count, 5)
+        client.request.assert_called_once()  # Retry sees the applied records: no POST.
+        self.assertEqual(self.status.snapshot()["dns_history"], [])
 
-    def test_changed_dns_between_steps_refuses_write(self):
+    def test_write_builds_against_live_dns_and_still_detects_a_concurrent_edit(self):
         self.prepare_final()
-        real_client = auto.CloudflareClient(self.cfg)
-        real_client.records = Mock(return_value=records(NEW))
-        real_client.request = Mock()
-        self.service.client = real_client
+        client = auto.CloudflareClient(replace(self.cfg, zone_id="a"*32))
+        client.records = Mock(return_value=records(NEW))
+        client.request = Mock()
+        self.service.client = client
+        self.run_step("write")
+        self.assertEqual(self.status.snapshot()["phase"], "updated")
+        client.request.assert_not_called()  # Someone already applied this ranking.
+        client.records.side_effect = [records(), records(NEW)]
         self.run_step("write")
         self.assertEqual(self.status.snapshot()["phase"], "error")
-        real_client.request.assert_not_called()
+        client.request.assert_not_called()  # Changed between preflight and mutation.
+        self.assertIsNone(self.controller.snapshot()["actions"]["write"])
 
-    def test_persisted_results_do_not_authorize_steps_after_restart(self):
+    def test_write_uses_live_record_ids_and_preserves_unrelated_records(self):
+        self.prepare_final()
+        live = records(["104.18.34.99"])
+        live[0]["id"] = "new-record-id"
+        live.append({"id": "txt-id", "type": "TXT", "content": "keep me"})
+        client = auto.CloudflareClient(replace(self.cfg, zone_id="a"*32))
+        client.records = Mock(side_effect=[live, live, records(NEW) + [live[1]]])
+        client.request = Mock()
+        self.service.client = client
+        self.run_step("write")
+        plan = client.request.call_args.kwargs["body"]
+        self.assertEqual(plan["deletes"], [{"id": "new-record-id"}])
+        self.assertEqual(len(plan["posts"]), 3)
+        self.assertEqual(self.status.snapshot()["dns_history"][0]["ips"], ["104.18.34.99"])
+        self.assertEqual(self.status.snapshot()["phase"], "updated")
+
+    def test_persisted_results_restore_actions_but_writes_always_read_live_dns(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder)/"status.json"
             self.service.status = auto.Status(path, self.cfg)
             self.prepare_final()
             state = auto.Status(path, self.cfg)
             service = auto.Maintainer(self.cfg, self.client, self.runner, state, self.stop)
-            self.assertEqual(state.snapshot()["proposed_ips"], [])
-            for action in ("check", "compare", "write"):
-                with self.subTest(action=action), self.assertRaises(auto.ServiceError):
-                    service.require_action(action)
+            self.assertEqual(state.snapshot()["proposed_ips"], NEW)
+            with self.assertRaises(auto.ServiceError):
+                service.require_action("check")
+            service.require_action("compare")
+            service.require_action("write")
+            self.client.records.reset_mock()
+            service.write()
+            self.client.records.assert_called_once()
+
+    def test_restore_ignores_invalid_samples_and_stale_proposal_markers(self):
+        self.status.update(check_results=[row("127.0.0.1"), row(IPS[0]), row(IPS[0]), row(IPS[1], speed=float("inf"))],
+                           selection_results=[row(NEW[0]), {"ip": NEW[1]}, row(NEW[2])],
+                           proposed_ips=["127.0.0.1"], ranked_time=1)
+        service = auto.Maintainer(self.cfg, self.client, self.runner, self.status, self.stop)
+        self.assertEqual(len(service.final), 3)
+        self.assertEqual(set(self.status.snapshot()["proposed_ips"]), {IPS[0], NEW[0], NEW[2]})
+        self.assertFalse(self.status.snapshot()["proposal_applied"])
 
     def test_manual_and_automatic_tasks_share_one_reservation(self):
         entered, release = threading.Event(), threading.Event()
@@ -958,7 +1052,6 @@ class ManualSteps(unittest.TestCase):
 
     def test_insufficient_manual_finalists_cannot_write(self):
         self.prepare_final()
-        self.service.new_top = [row(NEW[0])]
         self.service.selection_rows = [row(NEW[0])]
         self.service.check_rows = [row(IPS[0], speed=1)]
         self.run_step("compare")

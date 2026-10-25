@@ -109,7 +109,7 @@ function renderSection(key, data) {
   }
   if (key === 'ranked') {
     $('#proposal').hidden = !data.proposed_ips?.length;
-    setText('#proposal', data.proposed_ips?.length ? `待写入：${data.proposed_ips.join('、')}` : '');
+    setText('#proposal', data.proposed_ips?.length ? `${data.proposal_applied ? '已同步' : '待写入'}：${data.proposed_ips.join('、')}` : '');
     renderResultRows('#ranked-rows', data.ranked_results, '', null, '#ranked-toggle', resultExpanded.ranked);
     setText('#ranked-time', data.ranked_time ? date(data.ranked_time) : '');
   }

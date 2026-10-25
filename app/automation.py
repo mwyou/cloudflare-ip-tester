@@ -29,7 +29,6 @@ from cfst_bundle import BUNDLED_DIR, VERSION, InstallError, bundled_release
 
 LOG = logging.getLogger("cfst-dns")
 ROOT = Path(__file__).resolve().parent
-STEP_TTL = 1800
 MIN_INTERVAL_SECONDS = 60
 DEFAULT_RECORD_COUNT = 3
 MIN_RECORD_COUNT = 1
@@ -48,7 +47,7 @@ STATUS_SECTIONS = {
     "check": {"check_results", "check_time", "single_results", "max_latency_ms", "min_bandwidth_mbps"},
     "selection": {"selection_results", "selection_existing_ips", "selection_candidate_count", "selection_time",
                   "single_results", "max_latency_ms", "min_bandwidth_mbps"},
-    "ranked": {"ranked_results", "ranked_time", "proposed_ips", "single_results", "max_latency_ms", "min_bandwidth_mbps"},
+    "ranked": {"ranked_results", "ranked_time", "proposed_ips", "proposal_applied", "single_results", "max_latency_ms", "min_bandwidth_mbps"},
     "events": {"events"},
 }
 SUMMARY_EXCLUDED = {"results", "check_results", "selection_results", "ranked_results", "single_results",
@@ -164,7 +163,7 @@ class CloudflareClient:
                 raise RateLimited("Cloudflare API 限流；保留 DNS，等待下个检查周期") from None
             raise ServiceError(f"Cloudflare API HTTP {exc.code}；请检查 Zone 和 DNS 读写权限") from None
         except (URLError, OSError, ValueError):
-            raise ServiceError("Cloudflare API 连接失败或响应无效；本次不更新 DNS") from None
+            raise ServiceError("Cloudflare API 连接失败或响应无效；请求结果未确认") from None
         if not isinstance(data, dict) or not data.get("success"):
             raise ServiceError("Cloudflare API 拒绝请求；请检查凭据及 DNS Edit 权限")
         return data
@@ -196,15 +195,15 @@ class CloudflareClient:
         # A last read catches edits made while a selection run was downloading.
         current = self.records()
         if fingerprint(current) != fingerprint(before):
-            raise ServiceError("测速期间 DNS 被其他程序修改；放弃覆盖，等待下个周期")
+            raise ServiceError("写入前 DNS 再次发生变化；本次未覆盖，可重试写入")
         plan = dns_plan(self.settings, current, ips, len(ips))
         if any(plan.values()):
             self.request(f"/zones/{self.zone_id()}/dns_records/batch", body=plan)
         # A write timeout is ambiguous: never retry a mutation blindly.
         after = self.records()
         managed = [r for r in after if r.get("type") == self.settings.kind]
-        if sorted(r.get("content") for r in managed) != sorted(ips) or any(r.get("proxied") for r in managed):
-            raise ServiceError("写入后核验未通过；请检查 DNS，下个周期将重新读取")
+        if sorted(r.get("content") for r in managed) != sorted(ips) or any(r.get("proxied") or r.get("ttl") != self.settings.ttl for r in managed):
+            raise ServiceError("写入后核验未通过；保留排序结果，重试前会重新读取 DNS")
         return after
 
 
@@ -455,7 +454,7 @@ class Status:
                      "results": [], "check_results": [], "selection_results": [], "ranked_results": [],
                      "check_time": None, "selection_time": None, "ranked_time": None,
                      "selection_candidate_count": None, "selection_existing_ips": [],
-                     "events": [], "steps": {}, "proposed_ips": [],
+                     "events": [], "steps": {}, "proposed_ips": [], "proposal_applied": False,
                      "manual_enabled": False, "busy": False, "active_action": None, "active_ip": None,
                      "single_results": {}}
         if path and path.is_file():
@@ -465,7 +464,7 @@ class Status:
                     for key in ("events", "last_dns_update", "results", "check_results", "selection_results",
                                 "ranked_results", "check_time", "selection_time", "ranked_time",
                                 "selection_candidate_count", "selection_existing_ips",
-                                "dns_ips", "dns_history", "dns_history_count", "interval_seconds", "single_results",
+                                "dns_ips", "dns_history", "dns_history_count", "dns_record_count", "interval_seconds", "single_results",
                                 "max_latency_ms", "min_bandwidth_mbps",
                                 "jitter_min_seconds", "jitter_max_seconds"):
                         self.data[key] = previous.get(key, self.data[key])
@@ -474,6 +473,9 @@ class Status:
                     if "dns_history" not in previous and previous.get("dns_change"):
                         change = previous["dns_change"]
                         self.data["dns_history"] = [{"ips": change["before"], "time": change["time"]}]
+                    count = self.data["dns_record_count"]
+                    if type(count) is not int or not MIN_RECORD_COUNT <= count <= MAX_RECORD_COUNT:
+                        self.data["dns_record_count"] = DEFAULT_RECORD_COUNT
                     history_count = self.data["dns_history_count"]
                     if type(history_count) is not int or not MIN_HISTORY_COUNT <= history_count <= MAX_HISTORY_COUNT:
                         history_count = DEFAULT_HISTORY_COUNT
@@ -522,22 +524,40 @@ class Maintainer:
     def __init__(self, settings, client, runner, status, stop, dry_run=False):
         self.cfg, self.client, self.runner, self.status, self.stop = settings, client, runner, status, stop
         self.dry_run = dry_run
-        # Execution inputs live only in memory. Persisted display results cannot
-        # authorize a write after restart.
         self.records = None
-        self.read_at = self.selected_at = self.compared_at = 0
-        self.new_top = None
-        self.final = []
-        self.check_rows = None
-        self.selection_rows = None
-        self.ranked = []
-        # The first DNS read adopts the number of existing records. If there
-        # are no records, the default is three; a UI selection then overrides
-        # this value for subsequent cycles in the current container.
-        self.record_count = None
+        # Displayed samples and execution inputs survive reads and failed tasks.
+        state = status.snapshot()
+        self.check_rows = self.restore_rows(state["check_results"])
+        self.selection_rows = self.restore_rows(state["selection_results"])
+        self.ranked, self.final = [], []
+        self.ranking_started = state["ranked_time"] is not None
+        self.record_count = None  # The first DNS read still adopts its real count.
+        status.update(check_results=self.check_rows, selection_results=self.selection_rows,
+                      ranked_results=[], results=[], proposed_ips=[], proposal_applied=False)
+        if self.ranking_started:
+            self.rebuild_ranking()
 
-    def fresh(self, timestamp):
-        return bool(timestamp) and 0 <= time.time() - timestamp < STEP_TTL
+    def restore_rows(self, rows):
+        restored = {}
+        for row in rows if isinstance(rows, list) else []:
+            try:
+                ip = str(ipaddress.ip_address(row["ip"]))
+                latency, speed = row["latency_ms"], row["speed_mibps"]
+                if not _valid_source(ip, self.cfg.kind) or not all(
+                        type(n) in (int, float) and math.isfinite(n) and n >= 0 for n in (latency, speed)):
+                    continue
+                restored[ip] = {**row, "ip": ip, "bandwidth_mbps": round(speed * 1048576 * 8 / 1_000_000, 3)}
+            except (TypeError, KeyError, ValueError):
+                continue
+        return list(restored.values())
+
+    def target_count(self):
+        return self.record_count or self.status.snapshot()["dns_record_count"]
+
+    def proposal_matches(self, records):
+        managed = [r for r in records if r.get("type") == self.cfg.kind]
+        return bool(self.final) and sorted(r.get("content", "") for r in managed) == sorted(r["ip"] for r in self.final) and all(
+            not r.get("proxied") and r.get("ttl") == self.cfg.ttl for r in managed)
 
     def valid_ips(self):
         return list(dict.fromkeys(str(ipaddress.ip_address(r["content"])) for r in (self.records or []) if
@@ -546,20 +566,11 @@ class Maintainer:
 
     def actions(self):
         reasons = dict.fromkeys(ACTIONS)
-        dns_reason = "先读取 DNS" if self.records is None else (None if self.fresh(self.read_at) else "DNS 快照已过期，请重新读取")
-        selection_reason = "先优选新 IP" if self.new_top is None else (None if self.fresh(self.selected_at) else "优选结果已过期，请重新优选")
-        current_reason = None
-        target = self.record_count or DEFAULT_RECORD_COUNT
-        if not dns_reason and len(self.valid_ips()) == target and self.check_rows is None:
-            current_reason = "先检测当前 IP"
-        reasons["check"] = dns_reason or (None if self.valid_ips() else "DNS 中没有可测的 Cloudflare IP")
-        # A comparison can rank a standalone selection before DNS is read;
-        # writing still requires the DNS snapshot for its optimistic check.
-        compare_dns_reason = dns_reason if self.records is not None else None
-        reasons["compare"] = compare_dns_reason or selection_reason or current_reason
-        reasons["write"] = dns_reason or selection_reason or (
-            f"先完成综合排序，取得 {target} 个 IP" if len(self.final) != target else
-            (None if self.fresh(self.compared_at) else "排序结果已过期，请重新排序"))
+        reasons["check"] = "先读取 DNS" if self.records is None else (None if self.valid_ips() else "DNS 中没有可测的 Cloudflare IP")
+        reasons["compare"] = None if self.check_rows or self.selection_rows else "暂无测速结果，请先检测或优选 IP"
+        target = self.target_count()
+        reasons["write"] = ("先完成综合排序" if not self.ranking_started else
+                            f"排序结果不足 {target} 个唯一 IP" if len(self.final) != target else None)
         if self.stop.is_set():
             return dict.fromkeys(ACTIONS, "服务已停止")
         return reasons
@@ -570,16 +581,9 @@ class Maintainer:
         if reason := self.actions()[action]:
             raise ServiceError(reason)
 
-    def invalidate_final(self):
-        self.final, self.compared_at, self.ranked = [], 0, []
-        state = self.status.snapshot()
-        steps = state["steps"]
-        for key in ("compare", "write"):
-            steps.pop(key, None)
-        for field in ("ranked_results", "results"):
-            for row in state[field]:
-                row.pop("selected", None)
-        self.status.update(proposed_ips=[], steps=steps, ranked_results=state["ranked_results"], results=state["results"])
+    def refresh_ranking(self):
+        if self.ranking_started:
+            self.rebuild_ranking()
 
     def complete(self, action, count):
         steps = self.status.snapshot()["steps"]
@@ -587,32 +591,24 @@ class Maintainer:
         self.status.update(steps=steps)
 
     def read(self):
-        self.records, self.read_at = None, 0
-        self.check_rows, self.selection_rows, self.new_top = None, None, None
-        self.invalidate_final()
-        steps = self.status.snapshot()["steps"]
-        for key in ACTIONS:
-            steps.pop(key, None)
-        self.status.update(phase="reading", steps=steps, message="正在读取 DNS")
+        self.status.update(phase="reading", message="正在读取 DNS")
         records = self.client.records()
         if any(r.get("type") in ("CNAME", "NS") for r in records):
             raise ServiceError("目标域名存在 CNAME / NS 冲突；未修改 DNS")
-        self.records, self.read_at = records, time.time()
+        self.records = records
         ips = list(dict.fromkeys(r["content"] for r in records if r.get("type") == self.cfg.kind))
         if self.record_count is None:
             self.record_count = len(ips) or DEFAULT_RECORD_COUNT
+        self.refresh_ranking()
         self.complete("read", len(ips))
         self.status.update(phase="read_done", dns_ips=ips, dns_record_count=self.record_count,
+                           proposal_applied=self.proposal_matches(records),
                            message=f"已读取 {len(ips)} 个 DNS IP；目标保留 {self.record_count} 条")
         return ips
 
     def check(self):
         self.require_action("check")
-        self.check_rows = None
-        self.invalidate_final()
-        steps = self.status.snapshot()["steps"]
-        steps.pop("check", None)
-        self.status.update(phase="checking", steps=steps, message="正在检测当前 IP")
+        self.status.update(phase="checking", message="正在检测当前 IP")
         ips = self.valid_ips()
         rows = self.runner.run(ips, len(ips))
         measured = {row["ip"] for row in rows}
@@ -627,8 +623,10 @@ class Maintainer:
         target = self.record_count or DEFAULT_RECORD_COUNT
         healthy = (len(managed) == len(ips) == len(rows) == good == target and
                    {r["ip"] for r in rows} == set(ips) and not any(r.get("proxied") for r in managed))
+        self.refresh_ranking()
         self.complete("check", good)
         self.status.update(results=rows, check_results=rows, check_time=tested_at, phase="healthy" if healthy else "check_done",
+                           single_results={ip: value for ip, value in self.status.snapshot()["single_results"].items() if ip not in measured},
                            message=f"{target} 个 IP 均达标，保持现有 DNS" if healthy else f"检测完成：{good} / {len(ips)} 个 IP 达标")
         return healthy
 
@@ -653,8 +651,6 @@ class Maintainer:
 
     def test_ip(self, value):
         ip = self.require_test_ip(value)
-        # A single retest cannot authorize a DNS write based on an old ranking.
-        self.invalidate_final()
         state = self.status.snapshot()
         singles = state["single_results"]
         singles.pop(ip, None)
@@ -687,7 +683,6 @@ class Maintainer:
         # IP must not insert it into the current DNS check or new-IP selection.
         self.check_rows = updated(self.check_rows)
         self.selection_rows = updated(self.selection_rows, True)
-        self.new_top = updated(self.new_top, True)
         values = {field: updated(state[field], field != "check_results")
                   for field in ("check_results", "selection_results", "ranked_results", "results")}
         steps = state["steps"]
@@ -696,16 +691,12 @@ class Maintainer:
         self.status.update(**values, single_results=dict(list(singles.items())[-100:]), steps=steps,
                            phase="ip_test_done", message=(f"单 IP 测速完成：{ip}" if result["measured"]
                                    else f"单 IP 测速未取得有效结果：{ip}"))
+        self.refresh_ranking()
         return result
 
     def select(self):
         self.require_action("select")
-        self.new_top, self.selected_at = None, 0
-        self.selection_rows = None
-        self.invalidate_final()
-        steps = self.status.snapshot()["steps"]
-        steps.pop("select", None)
-        self.status.update(phase="selecting", steps=steps, message="正在优选新 IP")
+        self.status.update(phase="selecting", message="正在优选新 IP")
         pool = candidate_pool(self.cfg, self.valid_ips())
         LOG.info("CFST 优选来源：%s 行，IPv4 / 具体 IP 候选计数 %s，延迟线程 %s，下载测试上限 %s",
                  len(pool), candidate_count(pool), self.cfg.threads, self.cfg.download_count)
@@ -713,37 +704,47 @@ class Maintainer:
         tested_at = time.time()
         rows = [{**row, "tested_at": tested_at} for row in rows]
         self.selection_rows = rows
-        self.new_top, self.selected_at = rows, tested_at
+        measured = {row["ip"] for row in rows}
+        self.refresh_ranking()
         self.complete("select", len(rows))
         self.status.update(results=rows, selection_results=rows, selection_time=tested_at,
                            selection_existing_ips=self.valid_ips(),
                            selection_candidate_count=candidate_count(pool), phase="select_done",
-                           message=f"优选完成：CFST 输出 {len(self.new_top)} 条结果")
+                           single_results={ip: value for ip, value in self.status.snapshot()["single_results"].items() if ip not in measured},
+                           message=f"优选完成：CFST 输出 {len(rows)} 条结果")
         return rows
+
+    def rebuild_ranking(self):
+        merged = {}
+        for row in self.check_rows:
+            merged[row["ip"]] = {**row, "source": "当前检测"}
+        for row in self.selection_rows:
+            merged.setdefault(row["ip"], {**row, "source": "新 IP 优选"})
+        ranked = sorted(merged.values(), key=lambda r: (-r["speed_mibps"], r["latency_ms"]))
+        target = self.target_count()
+        self.ranked = ranked
+        self.final = ranked[:target] if len(ranked) >= target else []
+        for row in ranked:
+            row["selected"] = row in self.final
+        state = self.status.snapshot()
+        steps = state["steps"]
+        steps["compare"] = {"time": time.time(), "count": len(self.final)}
+        proposed = [r["ip"] for r in self.final]
+        if proposed != state["proposed_ips"]:
+            steps.pop("write", None)
+        self.status.update(results=ranked, ranked_results=ranked, ranked_time=time.time(),
+                           proposed_ips=proposed, steps=steps,
+                           proposal_applied=self.proposal_matches(self.records or []))
+        return bool(self.final)
 
     def compare(self):
         self.require_action("compare")
-        self.invalidate_final()
-        merged = {}
-        for row in self.check_rows or []:
-            merged[row["ip"]] = {**row, "source": "当前检测"}
-        for row in self.selection_rows or self.new_top or []:
-            merged.setdefault(row["ip"], {**row, "source": "新 IP 优选"})
-        ranked = sorted(merged.values(), key=lambda r: (-r["speed_mibps"], r["latency_ms"]))
-        self.ranked = ranked
-        target = self.record_count or DEFAULT_RECORD_COUNT
-        good = ranked[:target]
-        self.complete("compare", len(good))
-        if len(good) < target:
-            self.status.update(results=ranked, ranked_results=ranked, ranked_time=time.time(), phase="degraded",
-                               message=f"综合排序后只有 {len(good)} 个结果；保留现有 DNS")
-            return False
-        self.final, self.compared_at = good[:target], time.time()
-        for row in self.final:
-            row["selected"] = True
-        self.status.update(results=ranked, ranked_results=ranked, ranked_time=time.time(), proposed_ips=[r["ip"] for r in self.final],
-                           phase="compare_done", message=f"综合排序完成，前 {target} 名待写入")
-        return True
+        self.ranking_started = True
+        ready = self.rebuild_ranking()
+        self.status.update(phase="compare_done" if ready else "degraded", message=(
+            f"综合排序完成，前 {self.target_count()} 名可写入" if ready else
+            f"综合排序后只有 {len(self.ranked)} 个结果；保留现有 DNS"))
+        return ready
 
     def write(self):
         self.require_action("write")
@@ -751,15 +752,13 @@ class Maintainer:
         if self.dry_run:
             self.status.update(phase="dry_run", message=f"演练完成：拟写入 {', '.join(selected)}；未写入 DNS")
             return
-        before = self.records
-        # Consume the proposal before making a request. A failed/ambiguous API
-        # write must not leave a clickable retry carrying the old snapshot.
-        self.records, self.read_at = None, 0
-        self.final, self.compared_at = [], 0
-        self.status.update(proposed_ips=[], steps={key: value for key, value in self.status.snapshot()["steps"].items()
-                                                   if key not in ("compare", "write")})
-        self.status.update(phase="updating", message="正在写入 DNS")
-        self.client.replace(before, selected)
+        self.status.update(phase="updating", proposal_applied=False, message="正在读取最新 DNS 并同步排序结果")
+        # Every attempt plans against a new snapshot, including retries after an
+        # ambiguous timeout. replace() checks again before mutation and verifies
+        # afterwards; an already-applied plan becomes a no-op, not duplicate posts.
+        before = self.client.records()
+        after = self.client.replace(before, selected)
+        self.records = after
         self.complete("write", len(selected))
         now = time.time()
         old_ips = list(dict.fromkeys(r.get("content") for r in before if r.get("type") == self.cfg.kind))
@@ -769,12 +768,10 @@ class Maintainer:
             history_count = state.get("dns_history_count", DEFAULT_HISTORY_COUNT)
             changes["dns_history"] = ([{"ips": old_ips, "time": now}]
                                       + state["dns_history"])[:history_count]
-        self.status.update(phase="updated", dns_ips=selected, last_dns_update=now,
+        self.status.update(phase="updated", dns_ips=selected, last_dns_update=now, proposal_applied=True,
                            message=f"已写入并核验 {len(selected)} 个 IP", **changes)
 
     def cycle(self, initial=False):
-        self.new_top, self.selected_at = None, 0
-        self.status.update(steps={})
         ips = self.read()
         managed = [r for r in self.records if r.get("type") == self.cfg.kind]
         target = self.record_count or DEFAULT_RECORD_COUNT
@@ -925,6 +922,8 @@ class TaskController:
             # Unrelated setting saves must not prevent first-read count adoption.
             if "dns_record_count" in values:
                 self.service.record_count = count
+                if count != state["dns_record_count"]:
+                    self.service.refresh_ranking()
             self.jitter_min_seconds, self.jitter_max_seconds = minimum, maximum
             self.next_check = deadline
             if schedule_changed:
