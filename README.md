@@ -17,6 +17,13 @@ environment:
 
 Token 需要目标 Zone 的 DNS Read、DNS Edit；自动查找 Zone 时还需 Zone Read。有 Zone ID 时，可以在 Compose 的 `environment` 中添加 `CF_ZONE_ID: "你的ZoneID"`。
 
+首次部署时，在 `compose.yaml` 所在目录创建数据目录并设置权限。容器以 UID/GID `10001:10001` 运行，NAS 上也需要让这个用户能够写入目录：
+
+```sh
+mkdir -p ./data
+sudo chown 10001:10001 ./data
+```
+
 启动：
 
 ```sh
@@ -27,6 +34,8 @@ docker compose up -d
 端口映射为 `18789:8787`，监听宿主机所有网络接口。在浏览器访问 `http://服务器IP:18789`，部署机器本机也可访问 <http://127.0.0.1:18789>。Web 支持通过 IP 或域名访问，操作接口保留同源校验。
 
 Compose 只运行一个服务。网站镜像版本在 `image` 中修改，CFST 固定使用镜像自带的官方版本。修改配置后执行 `docker compose up -d`；更新镜像先执行 `docker compose pull`。部署机器上填好凭据的 Compose 文件请保留在本机。
+
+Compose 将宿主机的 `./data` 映射到容器 `/data`，设置和运行数据保存在 `./data/status.json`。`./data` 相对于 Compose 项目目录；也可以把映射左侧改成 NAS 上的绝对路径，例如 `/vol1/docker/cloudflare-ip-tester/data:/data`，并对该实际目录设置上述权限。更新镜像或重建容器时，继续使用同一个目录即可保留数据。出现 `Permission denied: '/data/worker.lock'` 时，检查宿主机目录的所有者和 NAS ACL 写入权限，不需要修改 CFST 目录。
 
 ## 运行逻辑
 
@@ -44,7 +53,7 @@ Compose 只运行一个服务。网站镜像版本在 `image` 中修改，CFST �
 
 顶部状态每 3 秒通过轻量接口更新；设置、DNS、测速结果和运行记录只在对应数据变化时更新，空闲轮询不重复下载完整结果、不重建列表。自动任务、其他浏览器中的操作和服务重启同样会触发相关区域更新。
 
-运行设置无需写入 Compose。检查间隔、随机波动、检测标准、历史份数及结果保存在容器内部状态文件中，普通进程重启可恢复测速结果及排序操作，写入仍会读取实时 DNS；重建或删除容器后清空；DNS 记录数量在启动时重新采用现有 DNS 数量。
+运行设置无需写入 Compose。检查间隔、随机波动、检测标准、历史份数及结果保存在 `/data/status.json`，由 Compose 的目录映射持久化。重启、更新镜像或重建容器后可恢复设置、测速结果及排序操作，写入仍会读取实时 DNS；删除宿主机数据目录才会清空这些数据。DNS 记录数量在启动时重新采用现有 DNS 数量。
 
 
 默认把完整的 Cloudflare CIDR 网段交给 CFST，由 CFST 按每个 `/24` 展开并完成延迟筛选；当前官方 IPv4 网段约有 5956 个候选，优选阶段默认下载测试 10 个 IP，终端显示前 10 行。CSV 包含所有通过延迟筛选的结果，其中部分 IP 未参与下载测试，速度零值不能一律解释成下载失败。后台保留完整 CSV 结果，展开新 IP 区域可查看排除本轮已有 DNS IP 后的所有行。测速使用部署机器的出口，真实下载会消耗流量。CFST CSV 的速度按 MiB/s 换算为 Mbps 后比较。
@@ -61,7 +70,18 @@ docker compose logs --tail=100
 docker compose down
 ```
 
-容器名固定为 `cfst-dns`。服务使用容器内部可写目录运行，不创建数据卷；重建或删除容器后，状态、页面设置和测速记录都会清空。CFST 始终从镜像内置路径运行。
+容器名固定为 `cfst-dns`。数据使用 `./data:/data` 目录映射，`docker compose down` 不会删除宿主机的 `data` 目录。备份时先停止容器，再复制整个 `data` 目录；恢复时放回原目录并确认 UID/GID `10001:10001` 有写入权限。Cloudflare 域名和 Token 仍从 Compose 环境变量读取，Token 不写入状态文件。CFST 始终从镜像内置路径运行。
+
+旧部署没有目录映射时，先导出现有状态，再修改 Compose 和重建容器，否则原容器中的数据不会自动迁移。在原 `compose.yaml` 所在目录执行：
+
+```sh
+docker compose stop
+mkdir -p ./data
+docker cp cfst-dns:/data/status.json ./data/status.json
+sudo chown -R 10001:10001 ./data
+```
+
+然后在服务配置中加入 `volumes: ["./data:/data"]`，执行 `docker compose up -d`。上述命令假定旧容器名为 `cfst-dns`；自定义名称时请替换。如果旧容器尚未生成状态文件，可跳过复制步骤，从默认设置开始。只复制状态文件即可，无需迁移锁文件和测速临时目录。
 
 ## 内置 CFST
 

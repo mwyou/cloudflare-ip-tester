@@ -10,6 +10,8 @@ services:
     environment:
       CF_DOMAIN: ""       # 填写完整优选域名
       CF_API_TOKEN: ""    # 填写 Cloudflare API Token
+    volumes:
+      - ./data:/data
     tmpfs: ["/tmp:size=32m,mode=1777"]
     cap_drop: ["ALL"]
     security_opt: ["no-new-privileges:true"]
