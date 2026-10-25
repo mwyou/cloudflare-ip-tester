@@ -1,4 +1,4 @@
-# Cloudflare 优选 IP（Docker）
+# Cloudflare 优选 IP（Docker）1.0.0
 
 使用官方 CloudflareSpeedTest（CFST）测速并维护指定域名的 DNS 记录。记录数量可配置，支持 Linux amd64、arm64。
 
@@ -7,35 +7,38 @@
 
 ## 部署
 
-安装 Docker 和 Compose v2，下载 [compose.yaml](https://raw.githubusercontent.com/mwyou/cloudflare-ip-tester/main/compose.yaml) 到一个部署目录。所有配置直接写在该文件中，必填项为：
+安装 Docker 和 Compose v2，在一个新目录创建 `compose.yaml`。正式版使用下面这一份配置，所有部署参数直接写在文件中：
 
 ```yaml
-environment:
-  CF_DOMAIN: "你的完整优选域名"
-  CF_API_TOKEN: "你的CloudflareToken"
+services:
+  cfst-dns:
+    image: cotelforce/cloudflare-ip-tester:latest
+    container_name: cloudflare-ip-tester
+    restart: unless-stopped
+    ports:
+      - "36963:36963"
+    environment:
+      CF_DOMAIN: ""
+      CF_API_TOKEN: ""
+    volumes:
+      - ./data:/data
 ```
 
-Token 需要目标 Zone 的 DNS Read、DNS Edit；自动查找 Zone 时还需 Zone Read。有 Zone ID 时，可以在 Compose 的 `environment` 中添加 `CF_ZONE_ID: "你的ZoneID"`。
+把 `CF_DOMAIN` 改成完整优选域名，把 `CF_API_TOKEN` 改成 Cloudflare API Token。Token 至少需要目标 Zone 的 DNS Read、DNS Edit；自动查找 Zone 时还需要 Zone Read。有 Zone ID 时，可以在 `environment` 中添加 `CF_ZONE_ID`，这样不需要 Zone Read。
 
-首次部署时，在 `compose.yaml` 所在目录创建数据目录并设置权限。容器以 UID/GID `10001:10001` 运行，NAS 上也需要让这个用户能够写入目录：
+创建数据目录并启动：
 
 ```sh
 mkdir -p ./data
-sudo chown 10001:10001 ./data
-```
-
-启动：
-
-```sh
 docker compose pull
 docker compose up -d
 ```
 
-端口映射为 `18789:8787`，监听宿主机所有网络接口。在浏览器访问 `http://服务器IP:18789`，部署机器本机也可访问 <http://127.0.0.1:18789>。Web 支持通过 IP 或域名访问，操作接口保留同源校验。
+打开 `http://服务器IP:36963`。端口监听宿主机所有网络接口，部署机器本机也可以访问 <http://127.0.0.1:36963>。首次启动会自动准备映射的 `./data` 目录并以服务用户运行，设置、测速结果和历史记录写入 `./data/status.json`。
 
 Compose 只运行一个服务。网站镜像版本在 `image` 中修改，CFST 固定使用镜像自带的官方版本。修改配置后执行 `docker compose up -d`；更新镜像先执行 `docker compose pull`。部署机器上填好凭据的 Compose 文件请保留在本机。
 
-Compose 将宿主机的 `./data` 映射到容器 `/data`，设置和运行数据保存在 `./data/status.json`。`./data` 相对于 Compose 项目目录；也可以把映射左侧改成 NAS 上的绝对路径，例如 `/vol1/docker/cloudflare-ip-tester/data:/data`，并对该实际目录设置上述权限。更新镜像或重建容器时，继续使用同一个目录即可保留数据。出现 `Permission denied: '/data/worker.lock'` 时，检查宿主机目录的所有者和 NAS ACL 写入权限，不需要修改 CFST 目录。
+Compose 将宿主机的 `./data` 映射到容器 `/data`。`./data` 相对于 Compose 项目目录；也可以换成 NAS 上的绝对路径，例如 `/vol1/docker/cloudflare-ip-tester/data:/data`。正式版启动脚本会短暂以 root 调整数据目录权限，再以 UID/GID `10001:10001` 运行服务；如果 NAS 开启了 root squash 或 ACL 禁止容器写入，界面启动前会提示检查共享目录权限。
 
 ## 运行逻辑
 
@@ -70,18 +73,7 @@ docker compose logs --tail=100
 docker compose down
 ```
 
-容器名固定为 `cfst-dns`。数据使用 `./data:/data` 目录映射，`docker compose down` 不会删除宿主机的 `data` 目录。备份时先停止容器，再复制整个 `data` 目录；恢复时放回原目录并确认 UID/GID `10001:10001` 有写入权限。Cloudflare 域名和 Token 仍从 Compose 环境变量读取，Token 不写入状态文件。CFST 始终从镜像内置路径运行。
-
-旧部署没有目录映射时，先导出现有状态，再修改 Compose 和重建容器，否则原容器中的数据不会自动迁移。在原 `compose.yaml` 所在目录执行：
-
-```sh
-docker compose stop
-mkdir -p ./data
-docker cp cfst-dns:/data/status.json ./data/status.json
-sudo chown -R 10001:10001 ./data
-```
-
-然后在服务配置中加入 `volumes: ["./data:/data"]`，执行 `docker compose up -d`。上述命令假定旧容器名为 `cfst-dns`；自定义名称时请替换。如果旧容器尚未生成状态文件，可跳过复制步骤，从默认设置开始。只复制状态文件即可，无需迁移锁文件和测速临时目录。
+容器名为 `cloudflare-ip-tester`。`docker compose down` 不会删除宿主机的 `data` 目录；备份时复制整个 `data` 目录即可。Cloudflare 域名和 Token 从 Compose 环境变量读取，Token 不写入状态文件。CFST 始终从镜像内置路径运行。
 
 ## 内置 CFST
 
@@ -99,7 +91,7 @@ docker build -t cfipdesk-cfst:local .
 
 然后将 `compose.yaml` 第一处 `image` 改为 `cfipdesk-cfst:local`，执行 `docker compose up -d`。Compose 配置不进入镜像构建上下文。
 
-GitHub 推送 `main` 会运行测试和双架构容器检查；推送 `v主版本.次版本.修订版本` 标签会发布版本镜像和 `latest`。发布使用仓库变量 `DOCKERHUB_USERNAME`、`DOCKERHUB_IMAGE` 和 Secret `DOCKERHUB_TOKEN`，当前仓库已配置。
+这是正式版 `1.0.0`。镜像标签为 `cotelforce/cloudflare-ip-tester:1.0.0` 和 `cotelforce/cloudflare-ip-tester:latest`；后续更新镜像后执行 `docker compose pull && docker compose up -d`，`./data` 中的设置和结果会保留。
 
 离线测试：
 

@@ -77,6 +77,16 @@ jobs:
           ARCH: ${{ matrix.arch }}
         run: |
           docker run --rm --platform "linux/$ARCH" --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+            --user 10001:10001 \
             --tmpfs /tmp:size=32m,mode=1777 \
             --volume "$GITHUB_WORKSPACE/tests/container_smoke.py:/checks/container_smoke.py:ro" \
             --entrypoint python "cfipdesk-ci:$ARCH" /checks/container_smoke.py "$ARCH"
+      - name: Check writable bind mount startup
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          data_dir="$RUNNER_TEMP/cfip-bind-probe"
+          mkdir -p "$data_dir"
+          docker run --rm --platform "linux/$ARCH" --volume "$data_dir:/data" \
+            "cfipdesk-ci:$ARCH" --help >/dev/null
+          test "$(stat -c '%u:%g' "$data_dir")" = "10001:10001"

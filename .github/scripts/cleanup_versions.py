@@ -16,9 +16,9 @@ def version(value):
     return tuple(map(int, value.split(".")))
 
 
-def older_tags(tags, keep):
-    target = version(keep)
-    return sorted(name for name in tags if re.fullmatch(r"\d+\.\d+\.\d+", name) and version(name) < target)
+def other_version_tags(tags, keep):
+    version(keep)
+    return sorted(name for name in tags if name != keep and re.fullmatch(r"\d+\.\d+\.\d+", name))
 
 
 def main():
@@ -64,7 +64,7 @@ def main():
     # Both release and latest must already exist and point at the same image.
     if not tags.get(keep, {}).get("digest") or tags[keep]["digest"] != tags.get("latest", {}).get("digest"):
         raise ValueError("Kept version and latest must reference the same published image")
-    candidates = older_tags(tags, keep)
+    candidates = other_version_tags(tags, keep)
     print(json.dumps({"keep": [keep, "latest"], "delete": candidates}), flush=True)
     if os.environ.get("APPLY") != "true":
         return

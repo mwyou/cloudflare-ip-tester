@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       keep_version:
-        description: 'Published version to keep together with latest (e.g. 3.2.19)'
+        description: 'Published version to keep together with latest (e.g. 1.0.0)'
         required: true
         type: string
       apply:
-        description: 'Delete the listed older version tags; false only previews'
+        description: 'Delete every other numeric version tag; false only previews'
         required: true
         default: false
         type: boolean

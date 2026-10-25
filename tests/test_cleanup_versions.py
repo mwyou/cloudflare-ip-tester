@@ -16,7 +16,7 @@ spec.loader.exec_module(cleanup)
 class CleanupTests(unittest.TestCase):
     def run_cleanup(self, apply=False, matching=True):
         tags = {name: {"name": name, "digest": "sha256:new"} for name in
-                ("latest", "3.2.19", "3.2.18", "3.2.9", "3.2.20", "dev")}
+                ("latest", "1.0.0", "3.2.19", "3.2.18", "3.2.9", "3.2.20", "dev")}
         if not matching:
             tags["latest"]["digest"] = "sha256:other"
         calls = []
@@ -32,7 +32,7 @@ class CleanupTests(unittest.TestCase):
                 data = {"results": list(tags.values()), "next": None}
             return io.BytesIO(json.dumps(data).encode() if data is not None else b"")
 
-        with patch.dict(os.environ, {"KEEP_VERSION": "3.2.19", "APPLY": str(apply).lower(),
+        with patch.dict(os.environ, {"KEEP_VERSION": "1.0.0", "APPLY": str(apply).lower(),
                                     "DOCKERHUB_USERNAME": "cotelforce", "DOCKERHUB_TOKEN": "test"}), \
                 patch.object(cleanup, "urlopen", side_effect=open_request), patch("sys.stdout", new=io.StringIO()):
             cleanup.main()
@@ -43,11 +43,11 @@ class CleanupTests(unittest.TestCase):
         self.assertFalse(any(method == "DELETE" for method, _ in calls))
         self.assertIn("3.2.18", tags)
 
-    def test_apply_only_deletes_older_numeric_version_tags(self):
+    def test_apply_deletes_every_other_numeric_version_tag(self):
         calls, tags = self.run_cleanup(apply=True)
         deleted = [url for method, url in calls if method == "DELETE"]
-        self.assertEqual(set(tags), {"latest", "3.2.19", "3.2.20", "dev"})
-        self.assertEqual(len(deleted), 2)
+        self.assertEqual(set(tags), {"latest", "1.0.0", "dev"})
+        self.assertEqual(len(deleted), 4)
         self.assertTrue(all(url.startswith(
             "https://hub.docker.com/v2/repositories/cotelforce/cloudflare-ip-tester/tags/") for url in deleted))
 
@@ -56,8 +56,9 @@ class CleanupTests(unittest.TestCase):
             self.run_cleanup(apply=True, matching=False)
 
     def test_version_boundary_and_non_version_tags(self):
-        self.assertEqual(cleanup.older_tags(
-            ["3.2.9", "3.2.19", "3.2.20", "4.0.0", "latest", "3.2.18-dev", "v3.2.18"], "3.2.19"), ["3.2.9"])
+        self.assertEqual(cleanup.other_version_tags(
+            ["0.9.0", "1.0.0", "1.0.1", "3.2.19", "4.0.0", "latest", "1.0.1-dev", "v1.0.0"], "1.0.0"),
+            ["0.9.0", "1.0.1", "3.2.19", "4.0.0"])
         for value in ("latest", "../3.2.19", "3.2.19\n", "v3.2.19"):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 cleanup.version(value)

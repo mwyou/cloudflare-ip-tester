@@ -1120,7 +1120,7 @@ def main():
     parser.add_argument("--once", action="store_true", help="只执行一个周期")
     parser.add_argument("--dry-run", action="store_true", help="读取和测速，但不写 DNS")
     parser.add_argument("--dashboard-only", action="store_true", help="只预览未配置状态页面，不连接 Cloudflare")
-    parser.add_argument("--port", type=int, default=8787)
+    parser.add_argument("--port", type=int, default=36963)
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     if args.dashboard_only:

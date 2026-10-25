@@ -13,8 +13,8 @@ RUN groupadd --gid 10001 cfip && useradd --uid 10001 --gid 10001 --no-create-hom
 COPY --from=cfst /out/ /usr/local/lib/cfst/
 COPY app/ /app/
 COPY LICENSE-CFST THIRD_PARTY.md /app/
-USER 10001:10001
-EXPOSE 8787
+COPY docker/entrypoint.py /usr/local/bin/cfip-entrypoint.py
+EXPOSE 36963
 HEALTHCHECK --interval=60s --timeout=5s --start-period=20s --retries=3 \
-  CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/health',timeout=3).read()"]
-ENTRYPOINT ["python", "/app/automation.py"]
+  CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:36963/health',timeout=3).read()"]
+ENTRYPOINT ["python", "/usr/local/bin/cfip-entrypoint.py"]

@@ -1,20 +1,12 @@
 services:
   cfst-dns:
-    image: cotelforce/cloudflare-ip-tester:3.2.19
-    container_name: cfst-dns
+    image: cotelforce/cloudflare-ip-tester:latest
+    container_name: cloudflare-ip-tester
     restart: unless-stopped
-    init: true
-    stop_grace_period: 30s
     ports:
-      - "18789:8787"
+      - "36963:36963"
     environment:
       CF_DOMAIN: ""       # 填写完整优选域名
       CF_API_TOKEN: ""    # 填写 Cloudflare API Token
     volumes:
       - ./data:/data
-    tmpfs: ["/tmp:size=32m,mode=1777"]
-    cap_drop: ["ALL"]
-    security_opt: ["no-new-privileges:true"]
-    logging:
-      driver: json-file
-      options: {max-size: "10m", max-file: "3"}
