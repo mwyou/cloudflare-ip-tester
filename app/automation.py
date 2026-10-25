@@ -10,8 +10,8 @@ import math
 import os
 from pathlib import Path
 import queue
-import re
 import random
+import re
 import secrets
 import signal
 import subprocess
@@ -46,6 +46,11 @@ def valid_jitter(minimum, maximum):
     return (type(minimum) is int and type(maximum) is int and
             ((minimum == maximum == 0) or
              MIN_JITTER_SECONDS <= minimum <= maximum <= MAX_JITTER_SECONDS))
+
+
+def valid_thresholds(latency_ms, min_mbps):
+    return (type(latency_ms) in (int, float) and type(min_mbps) in (int, float) and
+            1 <= latency_ms <= 2000 and 0.1 <= min_mbps <= 10000)
 
 
 def secret_value(name: str) -> str:
@@ -436,7 +441,8 @@ class Status:
                      "check_time": None, "selection_time": None, "ranked_time": None,
                      "selection_candidate_count": None, "selection_existing_ips": [],
                      "events": [], "steps": {}, "proposed_ips": [],
-                     "manual_enabled": False, "busy": False, "active_action": None}
+                     "manual_enabled": False, "busy": False, "active_action": None, "active_ip": None,
+                     "single_results": {}}
         if path and path.is_file():
             try:
                 previous = json.loads(path.read_text(encoding="utf-8"))
@@ -444,7 +450,8 @@ class Status:
                     for key in ("events", "last_dns_update", "results", "check_results", "selection_results",
                                 "ranked_results", "check_time", "selection_time", "ranked_time",
                                 "selection_candidate_count", "selection_existing_ips",
-                                "dns_ips", "dns_history", "dns_history_count",
+                                "dns_ips", "dns_history", "dns_history_count", "interval_seconds", "single_results",
+                                "max_latency_ms", "min_bandwidth_mbps",
                                 "jitter_min_seconds", "jitter_max_seconds"):
                         self.data[key] = previous.get(key, self.data[key])
                     # Migrate the previous single-change display once. Only
@@ -462,6 +469,11 @@ class Status:
                         jitter_min = jitter_max = 0
                     self.data["jitter_min_seconds"] = jitter_min
                     self.data["jitter_max_seconds"] = jitter_max
+                    interval = self.data["interval_seconds"]
+                    if type(interval) is not int or not MIN_INTERVAL_SECONDS <= interval <= 86400:
+                        self.data["interval_seconds"] = settings.interval
+                    if not valid_thresholds(self.data["max_latency_ms"], self.data["min_bandwidth_mbps"]):
+                        self.data.update(max_latency_ms=settings.latency_ms, min_bandwidth_mbps=settings.min_mbps)
             except (ValueError, OSError):
                 pass
 
@@ -537,10 +549,14 @@ class Maintainer:
 
     def invalidate_final(self):
         self.final, self.compared_at, self.ranked = [], 0, []
-        steps = self.status.snapshot()["steps"]
+        state = self.status.snapshot()
+        steps = state["steps"]
         for key in ("compare", "write"):
             steps.pop(key, None)
-        self.status.update(proposed_ips=[], steps=steps)
+        for field in ("ranked_results", "results"):
+            for row in state[field]:
+                row.pop("selected", None)
+        self.status.update(proposed_ips=[], steps=steps, ranked_results=state["ranked_results"], results=state["results"])
 
     def complete(self, action, count):
         steps = self.status.snapshot()["steps"]
@@ -590,6 +606,72 @@ class Maintainer:
         self.status.update(results=rows, check_results=rows, check_time=time.time(), phase="healthy" if healthy else "check_done",
                            message=f"{target} 个 IP 均达标，保持现有 DNS" if healthy else f"检测完成：{good} / {len(ips)} 个 IP 达标")
         return healthy
+
+    def require_test_ip(self, value):
+        try:
+            address = ipaddress.ip_address(value)
+        except ValueError:
+            raise ServiceError("IP 地址无效") from None
+        version = 4 if self.cfg.kind == "A" else 6
+        if address.version != version or not is_cloudflare_ip(str(address)):
+            raise ServiceError("只能测速与 DNS 类型匹配的 Cloudflare IP")
+        state = self.status.snapshot()
+        known = set(state["dns_ips"])
+        for snapshot in state["dns_history"]:
+            known.update(snapshot["ips"])
+        for field in ("check_results", "selection_results", "ranked_results"):
+            known.update(row["ip"] for row in state[field])
+        ip = str(address)
+        if ip not in known:
+            raise ServiceError("该 IP 已不在当前记录或测速结果中，请刷新页面")
+        return ip
+
+    def test_ip(self, value):
+        ip = self.require_test_ip(value)
+        # A single retest cannot authorize a DNS write based on an old ranking.
+        self.invalidate_final()
+        state = self.status.snapshot()
+        singles = state["single_results"]
+        singles.pop(ip, None)
+        self.status.update(phase="testing_ip", message=f"正在测速 {ip}")
+        try:
+            measured = self.runner.run([ip], 1)
+        except Exception as error:
+            singles[ip] = {"time": time.time(), "error": str(error) if isinstance(error, ServiceError) else "测速失败"}
+            self.status.update(single_results=dict(list(singles.items())[-100:]))
+            raise
+        result = next((row for row in measured if row.get("ip") == ip), None)
+        if result is None:
+            result = {"ip": ip, "speed_mibps": 0, "bandwidth_mbps": 0,
+                      "latency_ms": self.cfg.latency_ms + 1, "sent": 0, "received": 0,
+                      "loss": 1, "colo": "", "measured": False}
+        result = {**result, "measured": result.get("measured", True), "tested_at": time.time()}
+        singles[ip] = {"time": result["tested_at"], "result": result}
+
+        def updated(rows, sort=False):
+            if rows is None:
+                return None
+            output = [{**row, **result} if row["ip"] == ip else dict(row) for row in rows]
+            for row in output:
+                row.pop("selected", None)
+            if sort:
+                output.sort(key=lambda row: (-row["speed_mibps"], row["latency_ms"]))
+            return output
+
+        # Update only rows already in each result set. A retest of a historical
+        # IP must not insert it into the current DNS check or new-IP selection.
+        self.check_rows = updated(self.check_rows)
+        self.selection_rows = updated(self.selection_rows, True)
+        self.new_top = updated(self.new_top, True)
+        values = {field: updated(state[field], field != "check_results")
+                  for field in ("check_results", "selection_results", "ranked_results", "results")}
+        steps = state["steps"]
+        if "check" in steps:
+            steps["check"]["count"] = sum(qualifies(self.cfg, row) for row in values["check_results"])
+        self.status.update(**values, single_results=dict(list(singles.items())[-100:]), steps=steps,
+                           phase="ip_test_done", message=(f"单 IP 测速完成：{ip}" if result["measured"]
+                                   else f"单 IP 测速未取得有效结果：{ip}"))
+        return result
 
     def select(self):
         self.require_action("select")
@@ -665,7 +747,7 @@ class Maintainer:
 
     def cycle(self, initial=False):
         self.new_top, self.selected_at = None, 0
-        self.status.update(last_run=time.time(), next_run=None, steps={})
+        self.status.update(steps={})
         ips = self.read()
         managed = [r for r in self.records if r.get("type") == self.cfg.kind]
         target = self.record_count or DEFAULT_RECORD_COUNT
@@ -692,6 +774,9 @@ class TaskController:
         state = service.status.snapshot()
         self.jitter_min_seconds = state["jitter_min_seconds"]
         self.jitter_max_seconds = state["jitter_max_seconds"]
+        self.service.cfg = replace(service.cfg, interval=state["interval_seconds"],
+                                   latency_ms=state["max_latency_ms"], min_mbps=state["min_bandwidth_mbps"])
+        self.service.runner.settings = self.service.cfg
 
     def snapshot(self):
         data = self.service.status.snapshot()
@@ -700,10 +785,13 @@ class TaskController:
             data["actions"] = dict.fromkeys(ACTIONS, "任务运行中")
         return data
 
-    def run_reserved(self, action, initial=False):
+    def run_reserved(self, action, initial=False, ip=None):
         try:
             if action == "automatic":
+                self.schedule_next()
                 self.service.cycle(initial=initial)
+            elif action == "test_ip":
+                self.service.test_ip(ip)
             else:
                 getattr(self.service, action)()
         except Exception as error:
@@ -712,18 +800,23 @@ class TaskController:
             if not isinstance(error, (ServiceError, OSError, ValueError)):
                 LOG.error("任务异常：%s", type(error).__name__)
         finally:
-            self.service.status.update(busy=False, active_action=None)
+            self.service.status.update(busy=False, active_action=None, active_ip=None)
             self.lock.release()
 
-    def reserve(self, action):
+    def reserve(self, action, ip=None):
         if not self.lock.acquire(blocking=False):
             raise ServiceError("已有任务运行中，请稍后再试")
         try:
-            if action != "automatic":
+            if action == "test_ip":
+                if self.service.stop.is_set():
+                    raise ServiceError("服务已停止")
+                ip = self.service.require_test_ip(ip)
+            elif action != "automatic":
                 self.service.require_action(action)
             elif self.service.stop.is_set():
                 raise ServiceError("服务已停止")
-            self.service.status.update(busy=True, active_action=action, last_run=time.time())
+            self.service.status.update(busy=True, active_action=action, active_ip=ip,
+                                       **({"last_run": time.time()} if action != "test_ip" else {}))
         except Exception:
             self.lock.release()
             raise
@@ -734,7 +827,7 @@ class TaskController:
             self.worker = threading.Thread(target=self.run_reserved, args=(action,), daemon=True)
             self.worker.start()
         except Exception:
-            self.service.status.update(busy=False, active_action=None)
+            self.service.status.update(busy=False, active_action=None, active_ip=None)
             self.lock.release()
             raise
 
@@ -746,18 +839,44 @@ class TaskController:
         self.run_reserved("automatic", initial)
         return True
 
+    def schedule_next(self):
+        now = time.time()
+        delay = self.service.cfg.interval + self.jitter()
+        self.next_check = time.monotonic() + delay
+        self.service.status.update(last_run=now, next_run=now + delay)
+
+    def start_test_ip(self, value):
+        self.reserve("test_ip", value)
+        try:
+            self.worker = threading.Thread(target=self.run_reserved, args=("test_ip",),
+                                           kwargs={"ip": value}, daemon=True)
+            self.worker.start()
+        except Exception:
+            self.service.status.update(busy=False, active_action=None, active_ip=None)
+            self.lock.release()
+            raise
+
     def set_interval(self, seconds):
         if type(seconds) is not int or not MIN_INTERVAL_SECONDS <= seconds <= 86400:
             raise ServiceError(f"检查间隔必须在 {MIN_INTERVAL_SECONDS} 到 86400 秒之间")
+        self.set_schedule(seconds, self.jitter_min_seconds, self.jitter_max_seconds)
+
+    def set_schedule(self, interval, minimum, maximum):
+        if type(interval) is not int or not MIN_INTERVAL_SECONDS <= interval <= 86400:
+            raise ServiceError("检查间隔必须在 60 到 86400 秒之间")
+        if not valid_jitter(minimum, maximum):
+            raise ServiceError("随机波动区间必须在 1 到 10000 秒之间，下限不能大于上限；关闭时两项均为 0")
         if not self.lock.acquire(blocking=False):
             raise ServiceError("已有任务运行中，请稍后再试")
         try:
-            self.service.cfg = replace(self.service.cfg, interval=seconds)
+            self.jitter_min_seconds, self.jitter_max_seconds = minimum, maximum
+            self.service.cfg = replace(self.service.cfg, interval=interval)
             self.service.runner.settings = self.service.cfg
-            delay = seconds + self.jitter()
-            self.service.status.update(interval_seconds=seconds, next_run=time.time() + delay,
-                                       message=f"检查间隔已改为 {seconds // 60} 分钟")
+            delay = interval + self.jitter()
             self.next_check = time.monotonic() + delay
+            self.service.status.update(interval_seconds=interval, jitter_min_seconds=minimum,
+                                       jitter_max_seconds=maximum, next_run=time.time() + delay,
+                                       message=f"检查计划已更新：固定 {interval} 秒，随机增加 {minimum}～{maximum} 秒")
             self.scheduler_wakeup.set()
         finally:
             self.lock.release()
@@ -790,33 +909,29 @@ class TaskController:
         return random.randint(self.jitter_min_seconds, self.jitter_max_seconds)
 
     def set_jitter(self, minimum, maximum):
-        if not valid_jitter(minimum, maximum):
-            raise ServiceError("随机波动区间必须在 1 到 10000 秒之间，下限不能大于上限；关闭时两项均为 0")
+        self.set_schedule(self.service.cfg.interval, minimum, maximum)
+
+    def set_thresholds(self, latency_ms, min_mbps):
+        if not valid_thresholds(latency_ms, min_mbps):
+            raise ServiceError("延迟需为 1～2000 ms，带宽需为 0.1～10000 Mbps")
         if not self.lock.acquire(blocking=False):
             raise ServiceError("已有任务运行中，请稍后再试")
         try:
-            self.jitter_min_seconds, self.jitter_max_seconds = minimum, maximum
-            interval = self.service.cfg.interval
-            delay = interval + self.jitter()
-            self.service.status.update(jitter_min_seconds=minimum, jitter_max_seconds=maximum,
-                                       next_run=time.time() + delay,
-                                       message=("随机波动已关闭" if maximum == 0 else
-                                                f"随机波动已改为 {minimum} 到 {maximum} 秒"))
-            self.next_check = time.monotonic() + delay
-            self.scheduler_wakeup.set()
+            self.service.cfg = replace(self.service.cfg, latency_ms=latency_ms, min_mbps=min_mbps)
+            self.service.runner.settings = self.service.cfg
+            state = self.service.status.snapshot()
+            if "check" in state["steps"]:
+                state["steps"]["check"]["count"] = sum(qualifies(self.service.cfg, row) for row in state["check_results"])
+            self.service.status.update(max_latency_ms=latency_ms, min_bandwidth_mbps=min_mbps, steps=state["steps"],
+                                       phase="settings_saved",
+                                       message=f"检测标准已改为延迟 ≤ {latency_ms} ms、带宽 > {min_mbps} Mbps")
         finally:
             self.lock.release()
 
-    def next_delay(self, elapsed):
-        interval = self.service.cfg.interval
-        base = interval - elapsed if elapsed < interval else interval
-        return base + self.jitter()
-
-    def wait_next(self, delay):
+    def wait_next(self):
         with self.lock:
-            if not self.scheduler_wakeup.is_set():
-                self.next_check = time.monotonic() + delay
-                self.service.status.update(next_run=time.time() + delay)
+            if self.next_check is None:
+                self.schedule_next()
         while not self.service.stop.is_set():
             with self.lock:
                 self.scheduler_wakeup.clear()
@@ -886,7 +1001,7 @@ def make_dashboard(status, controller=None):
         def do_POST(self):
             if not self.valid_request(mutation=True):
                 return
-            if self.path not in ("/api/actions", "/api/settings"):
+            if self.path not in ("/api/actions", "/api/settings", "/api/test-ip"):
                 self.send_json(404, {"error": "接口不存在"})
                 return
             if self.headers.get("Content-Type", "").split(";", 1)[0] != "application/json":
@@ -905,10 +1020,16 @@ def make_dashboard(status, controller=None):
                 if self.path == "/api/actions":
                     if set(data) != {"action"} or data["action"] not in ACTIONS:
                         raise ValueError()
+                elif self.path == "/api/test-ip":
+                    if set(data) != {"ip"} or not isinstance(data["ip"], str):
+                        raise ValueError()
                 elif self.path == "/api/settings":
                     if (set(data) == {"interval_seconds"} and type(data["interval_seconds"]) is int) or \
                        (set(data) == {"dns_record_count"} and type(data["dns_record_count"]) is int) or \
                        (set(data) == {"dns_history_count"} and type(data["dns_history_count"]) is int) or \
+                       (set(data) == {"max_latency_ms", "min_bandwidth_mbps"} and
+                        type(data["max_latency_ms"]) in (int, float) and
+                        type(data["min_bandwidth_mbps"]) in (int, float)) or \
                        (set(data) == {"jitter_min_seconds", "jitter_max_seconds"} and
                         type(data["jitter_min_seconds"]) is int and type(data["jitter_max_seconds"]) is int):
                         pass
@@ -928,14 +1049,18 @@ def make_dashboard(status, controller=None):
                         controller.set_record_count(data["dns_record_count"])
                     elif "dns_history_count" in data:
                         controller.set_history_count(data["dns_history_count"])
+                    elif "max_latency_ms" in data:
+                        controller.set_thresholds(data["max_latency_ms"], data["min_bandwidth_mbps"])
                     else:
                         controller.set_jitter(data["jitter_min_seconds"], data["jitter_max_seconds"])
+                elif self.path == "/api/test-ip":
+                    controller.start_test_ip(data["ip"])
                 else:
                     controller.start(data["action"])
             except ServiceError as exc:
                 self.send_json(409, {"error": str(exc)})
                 return
-            self.send_json(202, {"accepted": data.get("action", "settings")})
+            self.send_json(202, {"accepted": "test_ip" if self.path == "/api/test-ip" else data.get("action", "settings")})
 
         def do_GET(self):
             if not self.valid_request():
@@ -1020,7 +1145,6 @@ def main():
         initial = True
         exit_code = 0
         while not stop.is_set():
-            start = time.monotonic()
             if not controller.automatic(initial=initial):
                 stop.wait(0.5)
                 continue
@@ -1028,9 +1152,7 @@ def main():
             if args.once:
                 exit_code = 1 if status.snapshot()["phase"] in ("error", "degraded") else 0
                 break
-            elapsed = time.monotonic() - start
-            delay = controller.next_delay(elapsed)
-            controller.wait_next(delay)
+            controller.wait_next()
     finally:
         stop.set()
         if server:

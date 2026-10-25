@@ -539,30 +539,48 @@ class ManualSteps(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(auto.ServiceError):
                 controller.set_record_count(value)
 
-    def test_jitter_samples_once_per_cycle_and_reschedules_on_settings_changes(self):
-        with patch.object(auto.random, "randint", side_effect=[10, 300, 20, 30]) as sample, \
+    def test_next_time_is_generated_at_start_and_not_recomputed_after_work(self):
+        with patch.object(auto.random, "randint", side_effect=[10, 300, 20]) as sample, \
                 patch.object(auto.time, "time", return_value=1000), \
                 patch.object(auto.time, "monotonic", return_value=500):
             self.controller.set_jitter(10, 300)
             self.assertEqual(self.status.snapshot()["next_run"], 4610)
             self.assertEqual(self.controller.next_check, 4110)
-            self.assertTrue(self.controller.scheduler_wakeup.is_set())
-            self.assertEqual(self.controller.next_delay(40), 3860)
-            self.assertEqual(self.controller.next_delay(4000), 3620)
+            observed = []
+            def read_dns():
+                observed.append(self.status.snapshot()["next_run"])
+                return records()
+            self.client.records.side_effect = read_dns
+            self.runner.run.return_value = [row(ip) for ip in IPS]
+            self.controller.automatic(initial=True)
+            self.assertEqual(observed, [4900])
+            self.assertEqual(self.status.snapshot()["next_run"], 4900)
+            self.assertEqual(self.controller.next_check, 4400)
+            # An overdue deadline does not draw a new random delay after a slow job.
+            with patch.object(auto.time, "monotonic", return_value=5000):
+                self.controller.wait_next()
+            self.controller.snapshot()
+            self.assertEqual(sample.call_count, 2)
+            self.assertEqual(self.status.snapshot()["next_run"], 4900)
             self.controller.set_interval(120)
-            self.assertEqual(self.status.snapshot()["next_run"], 1150)
-            self.assertEqual(self.controller.next_check, 650)
-            self.controller.snapshot()
-            self.controller.snapshot()
-            self.assertEqual(sample.call_count, 4)
-            self.assertTrue(all(call.args == (10, 300) for call in sample.call_args_list))
+            self.assertEqual(self.status.snapshot()["next_run"], 1140)
+            self.assertEqual(self.controller.next_check, 640)
         self.controller.set_jitter(0, 0)
-        self.assertEqual(self.controller.next_delay(20), 100)
+        self.assertAlmostEqual(self.status.snapshot()["next_run"] - time.time(), 120, delta=1)
         self.controller.set_jitter(1, 1)
-        self.assertEqual(self.controller.next_delay(20), 101)
+        self.assertAlmostEqual(self.status.snapshot()["next_run"] - time.time(), 121, delta=1)
         for minimum, maximum in ((0, 10), (10, 0), (-1, 5), (5, 4), (1, 10001), (True, 5), (1, 1.5)):
             with self.subTest(bounds=(minimum, maximum)), self.assertRaises(auto.ServiceError):
                 self.controller.set_jitter(minimum, maximum)
+
+    def test_failed_automatic_check_keeps_the_already_generated_next_time(self):
+        self.client.records.side_effect = auto.ServiceError("network unavailable")
+        with patch.object(auto.random, "randint", return_value=25) as sample, \
+                patch.object(auto.time, "time", return_value=1000):
+            self.controller.automatic(initial=True)
+        self.assertEqual(self.status.snapshot()["next_run"], 4625)
+        self.assertEqual(self.status.snapshot()["phase"], "error")
+        self.assertEqual(sample.call_count, 1)
 
     def test_scheduler_wakes_for_new_settings_and_keeps_displayed_deadline(self):
         entered, release = threading.Event(), threading.Event()
@@ -572,7 +590,7 @@ class ManualSteps(unittest.TestCase):
             release.wait(2)
             return original_wait(timeout)
         with patch.object(self.controller.scheduler_wakeup, "wait", side_effect=wait):
-            thread = threading.Thread(target=self.controller.wait_next, args=(3600,))
+            thread = threading.Thread(target=self.controller.wait_next)
             thread.start()
             try:
                 self.assertTrue(entered.wait(1))
@@ -621,6 +639,125 @@ class ManualSteps(unittest.TestCase):
         self.assertEqual(request({"dns_history_count": 5}, extra={"Origin": "https://other.example"}), 403)
         self.assertEqual(request({"action": "rollback"}, "/api/cfst"), 404)
         self.assertEqual(request({}, "/api/cfst/releases", "GET"), 404)
+        self.assertEqual(request({"max_latency_ms": 75.5, "min_bandwidth_mbps": 40}), 202)
+        self.assertEqual(self.service.cfg.latency_ms, 75.5)
+        self.assertEqual(request({"max_latency_ms": 100, "min_bandwidth_mbps": 0}), 409)
+        self.assertEqual(request({"max_latency_ms": True, "min_bandwidth_mbps": 30}), 400)
+        self.assertEqual(request({"ip": "127.0.0.1"}, "/api/test-ip"), 409)
+        self.assertEqual(request({"ip": IPS}, "/api/test-ip"), 400)
+        self.service.read()
+        self.runner.run.return_value = [row(IPS[0])]
+        self.assertEqual(request({"ip": IPS[0]}, "/api/test-ip"), 202)
+        self.controller.worker.join(3)
+        self.runner.run.assert_called_once_with([IPS[0]], 1)
+        self.client.replace.assert_not_called()
+
+
+    def test_threshold_changes_update_health_rule_and_restore_from_state(self):
+        self.run_step("read")
+        self.runner.run.return_value = [row(ip) for ip in IPS]
+        self.run_step("check")
+        self.controller.set_thresholds(70.5, 60)
+        self.assertEqual(self.service.cfg.latency_ms, 70.5)
+        self.assertEqual(self.service.runner.settings.min_mbps, 60)
+        self.assertEqual(self.status.snapshot()["steps"]["check"]["count"], 0)
+        self.assertFalse(auto.qualifies(self.service.cfg, row(IPS[0])))
+        for latency, speed in ((True, 30), (0, 30), (2001, 30), (100, .01), (100, 10001), (float("nan"), 30)):
+            with self.subTest(thresholds=(latency, speed)), self.assertRaises(auto.ServiceError):
+                self.controller.set_thresholds(latency, speed)
+        self.client.replace.assert_not_called()
+        with tempfile.TemporaryDirectory() as folder:
+            status = auto.Status(Path(folder)/"status.json", self.cfg)
+            status.update(interval_seconds=120, max_latency_ms=75, min_bandwidth_mbps=45)
+            restored = auto.Status(status.path, self.cfg)
+            service = auto.Maintainer(self.cfg, self.client, self.runner, restored, self.stop)
+            auto.TaskController(service)
+            self.assertEqual((service.cfg.interval, service.cfg.latency_ms, service.cfg.min_mbps), (120, 75, 45))
+
+    def test_single_ip_only_measures_one_and_updates_existing_rows_without_writing(self):
+        self.prepare_final()
+        before = self.status.snapshot()
+        self.runner.run.reset_mock()
+        self.runner.run.return_value = [row(IPS[0], speed=10, latency=25)]
+        self.controller.start_test_ip(IPS[0])
+        self.controller.worker.join(3)
+        self.runner.run.assert_called_once_with([IPS[0]], 1)
+        after = self.status.snapshot()
+        self.assertEqual(after["check_results"][0]["latency_ms"], 25)
+        self.assertEqual(after["check_results"][1:], before["check_results"][1:])
+        self.assertEqual(after["selection_results"], before["selection_results"])
+        self.assertEqual(after["ranked_results"][0]["ip"], IPS[0])
+        self.assertEqual(after["proposed_ips"], [])
+        self.assertFalse(any(r.get("selected") for r in after["ranked_results"]))
+        self.assertEqual(after["dns_ips"], before["dns_ips"])
+        self.assertEqual(after["single_results"][IPS[0]]["result"]["latency_ms"], 25)
+        self.client.replace.assert_not_called()
+
+    def test_historical_ip_retest_does_not_pollute_current_or_new_ip_results(self):
+        self.prepare_final()
+        old_ip = "104.18.34.99"
+        self.status.update(dns_history=[{"ips": [old_ip], "time": 100}])
+        before = self.status.snapshot()
+        self.runner.run.return_value = [row(old_ip, speed=7)]
+        self.controller.start_test_ip(old_ip)
+        self.controller.worker.join(3)
+        after = self.status.snapshot()
+        self.assertEqual(after["check_results"], before["check_results"])
+        self.assertEqual(after["selection_results"], before["selection_results"])
+        self.assertEqual(after["dns_history"], before["dns_history"])
+        self.assertIn(old_ip, after["single_results"])
+        self.client.replace.assert_not_called()
+
+    def test_single_ip_requires_visible_ip_and_shares_execution_lock(self):
+        self.run_step("read")
+        self.runner.run.reset_mock()
+        for ip in ("127.0.0.1", "104.18.13.0/24", "not-an-ip", "104.18.34.99"):
+            with self.subTest(ip=ip), self.assertRaises(auto.ServiceError):
+                self.controller.start_test_ip(ip)
+        self.runner.run.assert_not_called()
+        self.controller.reserve("automatic")
+        try:
+            with self.assertRaises(auto.ServiceError):
+                self.controller.start_test_ip(IPS[0])
+        finally:
+            self.controller.lock.release()
+        entered, release = threading.Event(), threading.Event()
+        def probe(*args):
+            entered.set()
+            release.wait(3)
+            return [row(IPS[0])]
+        self.runner.run.side_effect = probe
+        self.controller.start_test_ip(IPS[0])
+        try:
+            self.assertTrue(entered.wait(1))
+            self.assertEqual(self.controller.snapshot()["active_ip"], IPS[0])
+            self.assertFalse(self.controller.automatic())
+            with self.assertRaises(auto.ServiceError):
+                self.controller.start_test_ip(IPS[1])
+        finally:
+            release.set()
+            self.controller.worker.join(4)
+        self.assertFalse(self.controller.lock.locked())
+        self.assertIsNone(self.status.snapshot()["active_ip"])
+
+    def test_single_ip_failed_or_empty_result_is_not_reported_as_successful_sample(self):
+        self.prepare_final()
+        self.runner.run.side_effect = auto.RateLimited("429")
+        self.controller.start_test_ip(IPS[0])
+        self.controller.worker.join(3)
+        self.assertEqual(self.status.snapshot()["single_results"][IPS[0]]["error"], "429")
+        self.assertEqual(self.status.snapshot()["proposed_ips"], [])
+        self.runner.run.side_effect = None
+        self.runner.run.return_value = []
+        self.controller.start_test_ip(IPS[0])
+        self.controller.worker.join(3)
+        self.assertFalse(self.status.snapshot()["single_results"][IPS[0]]["result"]["measured"])
+        # A later successful measurement must clear the old measured=False flag.
+        self.runner.run.return_value = [row(IPS[0])]
+        self.controller.start_test_ip(IPS[0])
+        self.controller.worker.join(3)
+        self.assertTrue(self.status.snapshot()["check_results"][0]["measured"])
+        self.client.replace.assert_not_called()
 
     def test_manual_bootstrap_comparison_uses_selection_results(self):
         self.client.records.return_value = []

@@ -35,7 +35,8 @@ try:
     for path in ('/health', '/', '/auto.js', '/auto.css', '/logo.svg', '/api/status'):
         with opener.open(dashboard_url+path, timeout=5) as response:
             assert response.status == 200 and response.read(), path
-    for payload in ({'dns_history_count': 5}, {'jitter_min_seconds': 10, 'jitter_max_seconds': 300}):
+    for payload in ({'dns_history_count': 5}, {'jitter_min_seconds': 10, 'jitter_max_seconds': 300},
+                    {'max_latency_ms': 80, 'min_bandwidth_mbps': 50}):
         request = Request(dashboard_url+'/api/settings', json.dumps(payload).encode(),
                           {'Content-Type':'application/json','X-Local-Client':'cfst-dashboard','Origin':dashboard_url})
         with opener.open(request, timeout=5) as response:
@@ -43,6 +44,7 @@ try:
             response.read()
     assert status.snapshot()['dns_history_count'] == 5
     assert status.snapshot()['jitter_max_seconds'] == 300
+    assert service.cfg.latency_ms == 80 and service.cfg.min_mbps == 50
     for path in ('/api/cfst', '/api/cfst/releases'):
         try:
             opener.open(dashboard_url+path, timeout=5)

@@ -2,7 +2,7 @@
 const $ = selector => document.querySelector(selector);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 const date = value => value ? new Date(value * 1000).toLocaleString() : '—';
-const phases = {starting:'准备启动',reading:'读取 DNS',read_done:'读取完成',checking:'检查线路',check_done:'检测完成',selecting:'优选新 IP',select_done:'优选完成',comparing:'综合排序',compare_done:'等待写入',healthy:'全部达标',updating:'写入 DNS',updated:'已完成同步',degraded:'结果不足',error:'任务未完成',stopped:'已停止',unconfigured:'等待部署配置',dry_run:'演练完成'};
+const phases = {starting:'准备启动',reading:'读取 DNS',read_done:'读取完成',checking:'检查线路',check_done:'检测完成',selecting:'优选新 IP',select_done:'优选完成',comparing:'综合排序',compare_done:'等待写入',healthy:'全部达标',updating:'写入 DNS',updated:'已完成同步',degraded:'结果不足',error:'任务未完成',stopped:'已停止',unconfigured:'等待部署配置',dry_run:'演练完成',testing_ip:'单 IP 测速',ip_test_done:'单 IP 测速完成',settings_saved:'设置已更新'};
 let sending = false;
 let actionError = '';
 let timer;
@@ -10,13 +10,25 @@ let intervalMessage = '';
 let recordCountMessage = '';
 let historyCountMessage = '';
 let jitterMessage = '';
+let thresholdMessage = '';
+let thresholdDirty = false;
 const settingDrafts = new Set();
 let jitterDirty = false;
 const resultExpanded = {selection: false, ranked: false};
-function dnsItems(ips) {
-  return ips?.length ? ips.map(ip => `<div class="dns-item">${esc(ip)}</div>`).join('') : '<p class="muted">暂无记录</p>';
+function testButton(ip) {
+  const running = currentStatus.busy && currentStatus.active_ip === ip;
+  const disabled = sending || currentStatus.busy || !currentStatus.manual_enabled || currentStatus.phase === 'stopped';
+  return `<button type="button" class="ip-test${running?' running':''}" data-test-ip="${esc(ip)}" aria-label="测速 ${esc(ip)}" ${disabled?'disabled':''}>${running?'测速中':'测速'}</button>`;
 }
-function disableActions() { document.querySelectorAll('[data-action],.settings-panel button,.settings-panel select,.settings-panel input').forEach(button => { button.disabled = true; }); }
+function dnsItems(ips) {
+  return ips?.length ? ips.map(ip => {
+    const sample = currentStatus.single_results?.[ip];
+    const result = sample?.result;
+    const detail = sample ? sample.error || (result?.measured === false ? '无有效样本' : `${Number(result.latency_ms).toFixed(2)} ms · ${Number(result.bandwidth_mbps).toFixed(2)} Mbps`) : '';
+    return `<div class="dns-item"><div class="ip-line"><span>${esc(ip)}</span>${testButton(ip)}</div>${sample?`<small class="single-result">${esc(detail)}<br>${esc(date(sample.time))}</small>`:''}</div>`;
+  }).join('') : '<p class="muted">暂无记录</p>';
+}
+function disableActions() { document.querySelectorAll('[data-action],[data-test-ip],.settings-panel button,.settings-panel select,.settings-panel input').forEach(button => { button.disabled = true; }); }
 function renderResultRows(selector, rows, ranked, toggleSelector, expanded) {
   const body = $(selector);
   if (!rows?.length) {
@@ -27,8 +39,9 @@ function renderResultRows(selector, rows, ranked, toggleSelector, expanded) {
   }
   body.innerHTML = rows.map(row => {
     const good = row.latency_ms <= currentStatus.max_latency_ms && row.bandwidth_mbps > currentStatus.min_bandwidth_mbps;
+    const singleError = currentStatus.single_results?.[row.ip]?.error;
     const source = ranked ? `<td>${esc(row.source || '—')}</td>` : '';
-    return `<tr class="${row.selected?'selected':''}">${source}<td class="ip-cell">${esc(row.ip)}<small>${esc(row.colo || '—')}</small></td><td>${row.measured === false ? '—' : Number(row.latency_ms).toFixed(2)+' ms'}</td><td>${row.measured === false ? '—' : Number(row.bandwidth_mbps).toFixed(2)+' Mbps'}</td><td class="${good?'good':'bad'}">${row.selected?'入选':good?'达标':row.measured===false?'无有效样本':row.speed_mibps>0?'未达标':'无下载样本'}</td></tr>`;
+    return `<tr class="${row.selected?'selected':''}">${source}<td class="ip-cell"><div class="ip-line"><span>${esc(row.ip)}</span>${testButton(row.ip)}</div><small>${esc(row.colo || '—')}${row.tested_at?` · 单测 ${esc(date(row.tested_at))}`:''}</small>${singleError?`<small class="bad">${esc(singleError)}</small>`:''}</td><td>${row.measured === false ? '—' : Number(row.latency_ms).toFixed(2)+' ms'}</td><td>${row.measured === false ? '—' : Number(row.bandwidth_mbps).toFixed(2)+' Mbps'}</td><td class="${good?'good':'bad'}">${row.selected?'入选':good?'达标':row.measured===false?'无有效样本':row.speed_mibps>0?'未达标':'无下载样本'}</td></tr>`;
   }).join('');
   body.classList.toggle('collapsed', Boolean(toggleSelector) && !expanded && rows.length > 3);
   const toggle = toggleSelector && $(toggleSelector);
@@ -67,6 +80,7 @@ async function refresh() {
     $('#threshold').textContent = `≤ ${data.max_latency_ms} ms`;
     $('#bandwidth').textContent = `> ${data.min_bandwidth_mbps} Mbps`;
     $('#next').textContent = data.next_run ? new Date(data.next_run*1000).toLocaleTimeString() : '—';
+    $('#next').title = data.next_run ? date(data.next_run) : '';
     $('#last').textContent = data.last_run ? `上次：${date(data.last_run)}` : `每 ${data.interval_seconds/3600} 小时检查`;
     const intervalInput = $('#interval-minutes');
     if (!settingDrafts.has('#interval-minutes') && document.activeElement !== intervalInput) intervalInput.value = Math.round(data.interval_seconds / 60);
@@ -90,6 +104,12 @@ async function refresh() {
     }
     renderJitter();
     $('#jitter-status').textContent = jitterMessage || '在检查间隔上随机增加时间';
+    if (!thresholdDirty) {
+      $('#max-latency').value = data.max_latency_ms;
+      $('#min-bandwidth').value = data.min_bandwidth_mbps;
+    }
+    $('#max-latency').disabled = $('#min-bandwidth').disabled = $('#threshold-save').disabled = sending || data.busy || !data.manual_enabled;
+    $('#threshold-status').textContent = thresholdMessage;
     $('#phase').textContent = phases[data.phase] || data.phase;
     $('#notice').textContent = actionError || (data.phase === 'unconfigured' ? '预览模式，请先配置部署。' : data.message);
     $('#notice').className = actionError || ['error','degraded','unconfigured','stopped'].includes(data.phase) ? 'notice error' : 'notice';
@@ -150,6 +170,42 @@ document.querySelectorAll('[data-action]').forEach(button => button.addEventList
     await refresh();
   }
 }));
+document.addEventListener('click', async event => {
+  const button = event.target.closest('button[data-test-ip]');
+  if (!button || sending || button.disabled) return;
+  sending = true;
+  actionError = '';
+  disableActions();
+  try {
+    const response = await fetch('/api/test-ip', {method:'POST', headers:{'Content-Type':'application/json','X-Local-Client':'cfst-dashboard'}, body:JSON.stringify({ip:button.dataset.testIp})});
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || '测速启动失败');
+  } catch (error) { actionError = error.message || '测速启动失败'; }
+  finally { sending = false; await refresh(); }
+});
+for (const selector of ['#max-latency', '#min-bandwidth']) {
+  $(selector).addEventListener('input', () => { thresholdDirty = true; });
+}
+$('#threshold-save').addEventListener('click', async () => {
+  if (sending) return;
+  const latency = Number($('#max-latency').value);
+  const bandwidth = Number($('#min-bandwidth').value);
+  if (!Number.isFinite(latency) || !Number.isFinite(bandwidth) || latency < 1 || latency > 2000 || bandwidth < .1 || bandwidth > 10000) {
+    thresholdMessage = '延迟 1～2000 ms；带宽 0.1～10000 Mbps';
+    $('#threshold-status').textContent = thresholdMessage;
+    return;
+  }
+  sending = true;
+  thresholdMessage = '';
+  disableActions();
+  try {
+    const response = await fetch('/api/settings', {method:'POST', headers:{'Content-Type':'application/json','X-Local-Client':'cfst-dashboard'}, body:JSON.stringify({max_latency_ms:latency,min_bandwidth_mbps:bandwidth})});
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || '保存失败');
+    thresholdDirty = false;
+  } catch (error) { thresholdMessage = error.message || '保存失败'; }
+  finally { sending = false; await refresh(); }
+});
 function bindSetting({button, input, status, field, min, max, scale = 1, error, setMessage}) {
   $(input).addEventListener('input', () => settingDrafts.add(input));
   $(button).addEventListener('click', async () => {
