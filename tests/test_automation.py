@@ -84,6 +84,35 @@ class AutomationTests(unittest.TestCase):
         self.change_dns([], NEW)
         self.assertEqual(self.status.snapshot()["dns_history"][0]["ips"], [])
 
+    def test_history_limit_changes_trim_existing_and_limit_future_writes(self):
+        controller = auto.TaskController(self.service)
+        controller.set_history_count(3)
+        for before, after in ((IPS, NEW), (NEW, IPS), (IPS, NEW), (NEW, IPS)):
+            self.change_dns(before, after)
+        self.assertEqual([h["ips"] for h in self.status.snapshot()["dns_history"]], [NEW, IPS, NEW])
+        controller.set_history_count(1)
+        self.assertEqual(len(self.status.snapshot()["dns_history"]), 1)
+        controller.set_history_count(0)
+        self.change_dns(IPS, NEW)
+        self.assertEqual(self.status.snapshot()["dns_history"], [])
+        for value in (True, -1, 11, 1.5):
+            with self.subTest(value=value), self.assertRaises(auto.ServiceError):
+                controller.set_history_count(value)
+
+    def test_history_limit_and_jitter_restore_from_status_without_restoring_writes(self):
+        path = Path(self.folder.name) / "status.json"
+        state = auto.Status(path, self.cfg)
+        state.update(dns_history_count=4, dns_history=[{"ips": IPS, "time": i} for i in range(4)],
+                     jitter_min_seconds=10, jitter_max_seconds=300, proposed_ips=NEW)
+        restored = auto.Status(path, self.cfg).snapshot()
+        self.assertEqual(len(restored["dns_history"]), 4)
+        self.assertEqual((restored["jitter_min_seconds"], restored["jitter_max_seconds"]), (10, 300))
+        self.assertEqual(restored["proposed_ips"], [])
+        state.update(dns_history_count=True, jitter_min_seconds=100, jitter_max_seconds=10)
+        restored = auto.Status(path, self.cfg).snapshot()
+        self.assertEqual(restored["dns_history_count"], 2)
+        self.assertEqual(restored["jitter_max_seconds"], 0)
+
     def test_dns_history_reloads_and_migrates_old_status(self):
         path = Path(self.folder.name)/"status.json"
         path.write_text(json.dumps({"domain": self.cfg.domain, "record_type": "A",
@@ -509,6 +538,89 @@ class ManualSteps(unittest.TestCase):
         for value in (True, 0, 11):
             with self.subTest(value=value), self.assertRaises(auto.ServiceError):
                 controller.set_record_count(value)
+
+    def test_jitter_samples_once_per_cycle_and_reschedules_on_settings_changes(self):
+        with patch.object(auto.random, "randint", side_effect=[10, 300, 20, 30]) as sample, \
+                patch.object(auto.time, "time", return_value=1000), \
+                patch.object(auto.time, "monotonic", return_value=500):
+            self.controller.set_jitter(10, 300)
+            self.assertEqual(self.status.snapshot()["next_run"], 4610)
+            self.assertEqual(self.controller.next_check, 4110)
+            self.assertTrue(self.controller.scheduler_wakeup.is_set())
+            self.assertEqual(self.controller.next_delay(40), 3860)
+            self.assertEqual(self.controller.next_delay(4000), 3620)
+            self.controller.set_interval(120)
+            self.assertEqual(self.status.snapshot()["next_run"], 1150)
+            self.assertEqual(self.controller.next_check, 650)
+            self.controller.snapshot()
+            self.controller.snapshot()
+            self.assertEqual(sample.call_count, 4)
+            self.assertTrue(all(call.args == (10, 300) for call in sample.call_args_list))
+        self.controller.set_jitter(0, 0)
+        self.assertEqual(self.controller.next_delay(20), 100)
+        self.controller.set_jitter(1, 1)
+        self.assertEqual(self.controller.next_delay(20), 101)
+        for minimum, maximum in ((0, 10), (10, 0), (-1, 5), (5, 4), (1, 10001), (True, 5), (1, 1.5)):
+            with self.subTest(bounds=(minimum, maximum)), self.assertRaises(auto.ServiceError):
+                self.controller.set_jitter(minimum, maximum)
+
+    def test_scheduler_wakes_for_new_settings_and_keeps_displayed_deadline(self):
+        entered, release = threading.Event(), threading.Event()
+        original_wait = self.controller.scheduler_wakeup.wait
+        def wait(timeout):
+            entered.set()
+            release.wait(2)
+            return original_wait(timeout)
+        with patch.object(self.controller.scheduler_wakeup, "wait", side_effect=wait):
+            thread = threading.Thread(target=self.controller.wait_next, args=(3600,))
+            thread.start()
+            try:
+                self.assertTrue(entered.wait(1))
+                self.controller.set_jitter(10000, 10000)
+                deadline = self.controller.next_check
+                self.assertAlmostEqual(deadline - time.monotonic(), 13600, delta=1)
+                self.assertAlmostEqual(self.status.snapshot()["next_run"] - time.time(), 13600, delta=1)
+                self.stop.set()
+            finally:
+                release.set()
+                self.controller.scheduler_wakeup.set()
+                thread.join(3)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(self.controller.next_check, deadline)
+
+    def test_settings_endpoint_and_removed_cfst_endpoints(self):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), auto.make_dashboard(self.status, self.controller))
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        def request(payload, path="/api/settings", method="POST", extra=None):
+            conn = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+            try:
+                conn.request(method, path, json.dumps(payload), headers={"Content-Type": "application/json",
+                             "X-Local-Client": "cfst-dashboard"} | (extra or {}))
+                response = conn.getresponse()
+                response.read()
+                return response.status
+            finally:
+                conn.close()
+        for payload in ({"dns_history_count": 4}, {"jitter_min_seconds": 1, "jitter_max_seconds": 10000}):
+            self.assertEqual(request(payload), 202)
+        self.assertEqual(self.status.snapshot()["dns_history_count"], 4)
+        self.assertEqual(self.status.snapshot()["jitter_max_seconds"], 10000)
+        for payload in ({"jitter_min_seconds": 1}, {"dns_history_count": True},
+                        {"jitter_min_seconds": 1, "jitter_max_seconds": 2, "extra": 1}):
+            self.assertEqual(request(payload), 400)
+        self.assertEqual(request({"jitter_min_seconds": 100, "jitter_max_seconds": 1}), 409)
+        self.controller.reserve("automatic")
+        try:
+            for payload in ({"dns_history_count": 5}, {"jitter_min_seconds": 5, "jitter_max_seconds": 6}):
+                self.assertEqual(request(payload), 409)
+        finally:
+            self.controller.lock.release()
+        self.assertEqual(self.status.snapshot()["dns_history_count"], 4)
+        self.assertEqual(request({"dns_history_count": 5}, extra={"Origin": "https://other.example"}), 403)
+        self.assertEqual(request({"action": "rollback"}, "/api/cfst"), 404)
+        self.assertEqual(request({}, "/api/cfst/releases", "GET"), 404)
 
     def test_manual_bootstrap_comparison_uses_selection_results(self):
         self.client.records.return_value = []

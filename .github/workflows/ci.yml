@@ -31,7 +31,7 @@ jobs:
           python - <<'PY'
           import os
           from pathlib import Path
-          from cfst_manager import VERSION, HASHES, download_release, native_arch
+          from cfst_bundle import VERSION, HASHES, download_release, native_arch
           arch = native_arch()
           binary, _ = download_release(VERSION, arch, HASHES[arch])
           path = Path(os.environ['CFST_TEST_BIN'])
@@ -72,16 +72,11 @@ jobs:
           tags: cfipdesk-ci:${{ matrix.arch }}
           cache-from: type=gha,scope=ci-${{ matrix.arch }}
           cache-to: type=gha,scope=ci-${{ matrix.arch }},mode=max
-      - name: Check Linux CFST and volume persistence across containers
+      - name: Check bundled Linux CFST and dashboard
         env:
           ARCH: ${{ matrix.arch }}
         run: |
-          volume="cfst-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ARCH}"
-          docker volume create "$volume"
-          for mode in init existing; do
-            docker run --rm --platform "linux/$ARCH" --read-only --cap-drop ALL --security-opt no-new-privileges:true \
-              --tmpfs /tmp:size=32m,mode=1777 --volume "$volume:/opt/cfst" \
-              --volume "$GITHUB_WORKSPACE/tests/container_smoke.py:/checks/container_smoke.py:ro" \
-              --entrypoint python "cfipdesk-ci:$ARCH" /checks/container_smoke.py "$mode" "$ARCH"
-          done
-          docker volume rm "$volume"
+          docker run --rm --platform "linux/$ARCH" --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+            --tmpfs /tmp:size=32m,mode=1777 \
+            --volume "$GITHUB_WORKSPACE/tests/container_smoke.py:/checks/container_smoke.py:ro" \
+            --entrypoint python "cfipdesk-ci:$ARCH" /checks/container_smoke.py "$ARCH"

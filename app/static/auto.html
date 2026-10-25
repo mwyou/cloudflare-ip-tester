@@ -29,17 +29,33 @@
         <div class="setting">
           <label for="interval-minutes">检查间隔</label>
           <div class="setting-controls"><input id="interval-minutes" type="number" min="1" max="1440" step="1" disabled><span>分钟</span><button type="button" id="interval-save" disabled>保存</button></div>
-          <p class="hint" id="interval-status" role="status">—</p>
+          <p class="hint" id="interval-status" role="status"></p>
         </div>
         <div class="setting">
           <label for="dns-record-count">DNS 记录数量</label>
           <div class="setting-controls"><input id="dns-record-count" type="number" min="1" max="10" step="1" disabled><span>条</span><button type="button" id="dns-record-count-save" disabled>保存</button></div>
-          <p class="hint" id="dns-record-count-status" role="status">首次读取现有数量，无记录默认 3 条</p>
+          <p class="hint" id="dns-record-count-status" role="status"></p>
         </div>
-        <div class="setting cfst-setting">
-          <div class="setting-title"><label for="cfst-version">CFST 版本</label><span id="cfst-current" class="pill">读取中</span></div>
-          <div class="cfst-controls"><select id="cfst-version" disabled><option>读取中</option></select><button type="button" id="cfst-refresh" disabled>检查更新</button><button type="button" id="cfst-apply" disabled>切换版本</button><button type="button" id="cfst-rollback" disabled>回滚</button></div>
-          <p class="hint" id="cfst-status" role="status">—</p>
+        <div class="setting">
+          <label for="dns-history-count">旧记录份数</label>
+          <div class="setting-controls"><input id="dns-history-count" type="number" min="0" max="10" step="1" disabled><span>份</span><button type="button" id="dns-history-count-save" disabled>保存</button></div>
+          <p class="hint" id="dns-history-count-status" role="status">0 表示不保留</p>
+        </div>
+        <div class="setting jitter-setting">
+          <div class="setting-title"><span>随机波动</span><label class="jitter-switch" for="jitter-enabled"><input id="jitter-enabled" type="checkbox" disabled>启用</label></div>
+          <div class="jitter-controls">
+            <div class="jitter-range">
+              <output id="jitter-value" for="jitter-min jitter-max">关闭</output>
+              <div class="range-pair" id="jitter-range">
+                <div class="range-track"></div><div class="range-fill" id="jitter-fill"></div>
+                <input id="jitter-min" type="range" aria-label="随机波动下限（秒）" min="1" max="10000" step="1" value="1" disabled>
+                <input id="jitter-max" type="range" aria-label="随机波动上限（秒）" min="1" max="10000" step="1" value="300" disabled>
+              </div>
+              <div class="range-scale"><span>1 s</span><span>10000 s</span></div>
+            </div>
+            <button type="button" id="jitter-save" disabled>保存</button>
+          </div>
+          <p class="hint" id="jitter-status" role="status">在检查间隔上随机增加时间</p>
         </div>
       </div>
     </section>
@@ -58,7 +74,7 @@
         <div class="panel-title"><h2>当前 DNS</h2><span class="pill">仅 DNS</span></div>
         <div id="dns" class="dns-list"><p class="muted">暂无记录</p></div>
         <p class="hint" id="updated">尚未更新</p>
-        <div class="dns-history"><h3>变更前记录 <span class="pill">最近 2 次</span></h3><div id="dns-history"><p class="muted">暂无历史记录</p></div></div>
+        <div class="dns-history"><h3>变更前记录 <span id="history-count-pill" class="pill">最近 2 次</span></h3><div id="dns-history"><p class="muted">暂无历史记录</p></div></div>
       </section>
       <section class="panel results-panel" aria-label="测速结果">
         <div class="panel-title"><h2>测速结果</h2></div>
@@ -69,16 +85,14 @@
           <div class="table-wrap"><table><thead><tr><th scope="col">IP / 地区</th><th scope="col">TCP 延迟</th><th scope="col">下载带宽 ↓</th><th scope="col">状态</th></tr></thead><tbody id="check-rows"><tr><td colspan="4" class="empty">暂无结果</td></tr></tbody></table></div>
         </section>
         <section class="result-section" aria-label="CFST 新 IP 结果">
-          <div class="result-title"><h3>CFST 新 IP 结果</h3><span id="selection-count" class="pill"></span><time id="selection-time"></time></div>
+          <div class="result-title"><h3>CFST 新 IP 结果</h3><span id="selection-count" class="pill"></span><time id="selection-time"></time><button type="button" class="result-toggle" id="selection-toggle" aria-controls="selection-rows" aria-expanded="false" hidden>展开全部</button></div>
           <p class="hint result-hint">无下载样本表示未测速或未取得有效结果。</p>
           <div class="table-wrap"><table><thead><tr><th scope="col">IP / 地区</th><th scope="col">TCP 延迟</th><th scope="col">下载带宽 ↓</th><th scope="col">状态</th></tr></thead><tbody id="selection-rows"><tr><td colspan="4" class="empty">暂无结果</td></tr></tbody></table></div>
-          <button type="button" class="result-toggle" id="selection-toggle" aria-controls="selection-rows" aria-expanded="false" hidden>展开全部</button>
         </section>
         <section class="result-section" aria-label="综合排序">
-          <div class="result-title"><h3>综合排序</h3><time id="ranked-time"></time></div>
+          <div class="result-title"><h3>综合排序</h3><time id="ranked-time"></time><button type="button" class="result-toggle" id="ranked-toggle" aria-controls="ranked-rows" aria-expanded="false" hidden>展开全部</button></div>
 
           <div class="table-wrap"><table><thead><tr><th scope="col">来源</th><th scope="col">IP / 地区</th><th scope="col">TCP 延迟</th><th scope="col">下载带宽 ↓</th><th scope="col">状态</th></tr></thead><tbody id="ranked-rows"><tr><td colspan="5" class="empty">暂无结果</td></tr></tbody></table></div>
-          <button type="button" class="result-toggle" id="ranked-toggle" aria-controls="ranked-rows" aria-expanded="false" hidden>展开全部</button>
         </section>
       </section>
     </div>

@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import queue
 import re
+import random
 import secrets
 import signal
 import subprocess
@@ -24,7 +25,7 @@ from urllib.parse import urlencode, urlsplit
 from urllib.request import ProxyHandler, Request, build_opener
 
 from cloudflare import API, CF_NETWORKS, NoRedirect, is_cloudflare_ip, validate_domain, validate_url
-from cfst_manager import InstallError, ReleaseCatalog, Store, TAG, RELEASE_ID
+from cfst_bundle import BUNDLED_DIR, VERSION, InstallError, bundled_release
 
 LOG = logging.getLogger("cfst-dns")
 ROOT = Path(__file__).resolve().parent
@@ -33,7 +34,18 @@ MIN_INTERVAL_SECONDS = 60
 DEFAULT_RECORD_COUNT = 3
 MIN_RECORD_COUNT = 1
 MAX_RECORD_COUNT = 10
+DEFAULT_HISTORY_COUNT = 2
+MIN_HISTORY_COUNT = 0
+MAX_HISTORY_COUNT = 10
+MIN_JITTER_SECONDS = 1
+MAX_JITTER_SECONDS = 10000
 ACTIONS = ("read", "check", "select", "compare", "write")
+
+
+def valid_jitter(minimum, maximum):
+    return (type(minimum) is int and type(maximum) is int and
+            ((minimum == maximum == 0) or
+             MIN_JITTER_SECONDS <= minimum <= maximum <= MAX_JITTER_SECONDS))
 
 
 def secret_value(name: str) -> str:
@@ -70,11 +82,11 @@ class Settings:
     download_seconds: int = 10
     threads: int = 200
     test_url: str = "https://cf.xiu2.xyz/url"
-    binary: str = "/usr/local/bin/cfst"
+    binary: str = str(BUNDLED_DIR / "cfst")
     candidate_file: str = ""
     data_dir: Path = Path("/data")
     ttl: int = 60
-    cfst_version: str = "v2.3.5"
+    cfst_version: str = VERSION
 
     @classmethod
     def from_env(cls):
@@ -97,9 +109,9 @@ class Settings:
                    number("DOWNLOAD_COUNT", 10, 3, 50, True),
                    number("DOWNLOAD_SECONDS", 10, 5, 30, True), number("CFST_THREADS", 200, 1, 1000, True),
                    validate_url(os.environ.get("CFST_URL", cls.test_url)),
-                   os.environ.get("CFST_BIN", cls.binary), os.environ.get("CANDIDATE_FILE", ""),
+                   cls.binary, os.environ.get("CANDIDATE_FILE", ""),
                    Path(os.environ.get("DATA_DIR", "/data")), number("DNS_TTL", 60, 60, 86400, True),
-                   os.environ.get("CFST_VERSION", "v2.3.5"))
+                   VERSION)
 
 
 class ServiceError(RuntimeError):
@@ -280,7 +292,7 @@ class CFSTRunner:
                 process = subprocess.Popen(args, cwd=folder, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                            stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace")
             except OSError:
-                raise ServiceError("CFST 无法启动；请检查 CFST 运行目录或 CFST_BIN") from None
+                raise ServiceError("内置 CFST 无法启动；请检查容器日志或重新拉取镜像") from None
             lines = queue.Queue()
 
             def collect():
@@ -416,6 +428,8 @@ class Status:
                      "max_latency_ms": settings.latency_ms, "min_bandwidth_mbps": settings.min_mbps,
                      "interval_seconds": settings.interval, "phase": "starting", "message": "等待首次检查",
                      "dns_record_count": DEFAULT_RECORD_COUNT,
+                     "dns_history_count": DEFAULT_HISTORY_COUNT,
+                     "jitter_min_seconds": 0, "jitter_max_seconds": 0,
                      "last_run": None, "next_run": None, "last_dns_update": None,
                      "dns_ips": [], "dns_history": [],
                      "results": [], "check_results": [], "selection_results": [], "ranked_results": [],
@@ -430,14 +444,24 @@ class Status:
                     for key in ("events", "last_dns_update", "results", "check_results", "selection_results",
                                 "ranked_results", "check_time", "selection_time", "ranked_time",
                                 "selection_candidate_count", "selection_existing_ips",
-                                "dns_ips", "dns_history"):
+                                "dns_ips", "dns_history", "dns_history_count",
+                                "jitter_min_seconds", "jitter_max_seconds"):
                         self.data[key] = previous.get(key, self.data[key])
                     # Migrate the previous single-change display once. Only
                     # snapshots before a successful change belong in history.
                     if "dns_history" not in previous and previous.get("dns_change"):
                         change = previous["dns_change"]
                         self.data["dns_history"] = [{"ips": change["before"], "time": change["time"]}]
-                    self.data["dns_history"] = self.data["dns_history"][:2]
+                    history_count = self.data["dns_history_count"]
+                    if type(history_count) is not int or not MIN_HISTORY_COUNT <= history_count <= MAX_HISTORY_COUNT:
+                        history_count = DEFAULT_HISTORY_COUNT
+                    self.data["dns_history_count"] = history_count
+                    self.data["dns_history"] = self.data["dns_history"][:self.data["dns_history_count"]]
+                    jitter_min, jitter_max = self.data["jitter_min_seconds"], self.data["jitter_max_seconds"]
+                    if not valid_jitter(jitter_min, jitter_max):
+                        jitter_min = jitter_max = 0
+                    self.data["jitter_min_seconds"] = jitter_min
+                    self.data["jitter_max_seconds"] = jitter_max
             except (ValueError, OSError):
                 pass
 
@@ -632,8 +656,10 @@ class Maintainer:
         old_ips = list(dict.fromkeys(r.get("content") for r in before if r.get("type") == self.cfg.kind))
         changes = {}
         if set(old_ips) != set(selected):
+            state = self.status.snapshot()
+            history_count = state.get("dns_history_count", DEFAULT_HISTORY_COUNT)
             changes["dns_history"] = ([{"ips": old_ips, "time": now}]
-                                      + self.status.snapshot()["dns_history"])[:2]
+                                      + state["dns_history"])[:history_count]
         self.status.update(phase="updated", dns_ips=selected, last_dns_update=now,
                            message=f"已写入并核验 {len(selected)} 个 IP", **changes)
 
@@ -654,80 +680,36 @@ class Maintainer:
             self.write()
 
 
-class CFSTControl:
-    def __init__(self, store, smoke=None):
-        self.store = store
-        self.catalog = ReleaseCatalog(store.arch)
-        self.smoke = smoke
-
-    def snapshot(self):
-        data = self.catalog.snapshot()
-        try:
-            return data | self.store.inventory()
-        except (InstallError, OSError, ValueError, KeyError):
-            return data | {"installed": [], "current": None, "previous": None, "arch": self.store.arch,
-                           "error": "CFST 版本信息读取失败，请检查运行目录"}
-
-    def change(self, action, target):
-        lock = acquire_lock(self.store.home/"install.lock")
-        try:
-            kwargs = {"smoke": self.smoke} if self.smoke is not None else {}
-            if action == "install":
-                self.store.upgrade(target, self.catalog.resolve(target), **kwargs)
-            elif action == "switch":
-                self.store.select(target, **kwargs)
-            elif action == "rollback":
-                self.store.rollback(**kwargs)
-            else:
-                raise ServiceError("未知 CFST 操作")
-            return self.store.release(self.store.state()["active"])
-        finally:
-            lock.close()
-
-
 class TaskController:
     """Reserve execution before acknowledging HTTP; share one lock with cron."""
-    def __init__(self, service, cfst=None, scheduler_wakeup=None):
+    def __init__(self, service, scheduler_wakeup=None):
         self.service = service
-        self.cfst = cfst
         self.scheduler_wakeup = scheduler_wakeup if scheduler_wakeup is not None else threading.Event()
         self.next_check = None
         self.lock = threading.Lock()
         self.worker = None
         service.status.update(manual_enabled=True)
+        state = service.status.snapshot()
+        self.jitter_min_seconds = state["jitter_min_seconds"]
+        self.jitter_max_seconds = state["jitter_max_seconds"]
 
     def snapshot(self):
         data = self.service.status.snapshot()
-        data["cfst"] = self.cfst.snapshot() if self.cfst else None
         data["actions"] = self.service.actions()
         if data["busy"]:
             data["actions"] = dict.fromkeys(ACTIONS, "任务运行中")
         return data
 
-    def run_reserved(self, action, initial=False, target=None):
+    def run_reserved(self, action, initial=False):
         try:
-            if action.startswith("cfst_"):
-                self.service.status.update(phase="cfst_changing", message="正在校验并切换 CFST", cfst_message="正在校验并切换 CFST")
-                binary, metadata = self.cfst.change(action[5:], target)
-                cfg = replace(self.service.cfg, binary=str(binary), cfst_version=metadata["version"])
-                self.service.cfg, self.service.runner = cfg, CFSTRunner(cfg, self.service.stop)
-                self.service.records, self.service.read_at = None, 0
-                self.service.new_top, self.service.selected_at = None, 0
-                self.service.final, self.service.compared_at = [], 0
-                self.service.check_rows, self.service.selection_rows, self.service.ranked = None, None, []
-                self.service.status.update(engine="CFST " + metadata["version"], phase="cfst_ready",
-                                           results=[], steps={}, proposed_ips=[],
-                                           cfst_message=f"已启用 {metadata['version']}",
-                                           message=f"CFST 已切换到 {metadata['version']}")
-            elif action == "automatic":
+            if action == "automatic":
                 self.service.cycle(initial=initial)
             else:
                 getattr(self.service, action)()
         except Exception as error:
-            message = str(error) if isinstance(error, (ServiceError, InstallError)) else "任务失败；请检查容器日志和文件配置"
-            values = {"cfst_message": message} if action.startswith("cfst_") else {}
-            self.service.status.update(phase="error", message=message, **values)
-            if not isinstance(error, (ServiceError, InstallError, OSError, ValueError)):
+            message = str(error) if isinstance(error, ServiceError) else "任务失败；请检查容器日志和文件配置"
+            self.service.status.update(phase="error", message=message)
+            if not isinstance(error, (ServiceError, OSError, ValueError)):
                 LOG.error("任务异常：%s", type(error).__name__)
         finally:
             self.service.status.update(busy=False, active_action=None)
@@ -737,15 +719,11 @@ class TaskController:
         if not self.lock.acquire(blocking=False):
             raise ServiceError("已有任务运行中，请稍后再试")
         try:
-            if action.startswith("cfst_"):
-                if self.cfst is None or self.service.stop.is_set():
-                    raise ServiceError("CFST 管理不可用")
-            elif action != "automatic":
+            if action != "automatic":
                 self.service.require_action(action)
             elif self.service.stop.is_set():
                 raise ServiceError("服务已停止")
-            values = {} if action.startswith("cfst_") else {"last_run": time.time()}
-            self.service.status.update(busy=True, active_action=action, **values)
+            self.service.status.update(busy=True, active_action=action, last_run=time.time())
         except Exception:
             self.lock.release()
             raise
@@ -768,22 +746,6 @@ class TaskController:
         self.run_reserved("automatic", initial)
         return True
 
-    def start_cfst(self, action, target=None):
-        if (action not in ("install", "switch", "rollback") or
-                (action == "install" and (not isinstance(target, str) or not re.fullmatch(TAG, target))) or
-                (action == "switch" and (not isinstance(target, str) or not re.fullmatch(RELEASE_ID, target))) or
-                (action == "rollback" and target is not None)):
-            raise ServiceError("CFST 操作参数无效")
-        self.reserve("cfst_" + action)
-        try:
-            self.worker = threading.Thread(target=self.run_reserved,
-                                           args=("cfst_" + action,), kwargs={"target": target}, daemon=True)
-            self.worker.start()
-        except Exception:
-            self.service.status.update(busy=False, active_action=None)
-            self.lock.release()
-            raise
-
     def set_interval(self, seconds):
         if type(seconds) is not int or not MIN_INTERVAL_SECONDS <= seconds <= 86400:
             raise ServiceError(f"检查间隔必须在 {MIN_INTERVAL_SECONDS} 到 86400 秒之间")
@@ -792,9 +754,10 @@ class TaskController:
         try:
             self.service.cfg = replace(self.service.cfg, interval=seconds)
             self.service.runner.settings = self.service.cfg
-            self.service.status.update(interval_seconds=seconds, next_run=time.time() + seconds,
+            delay = seconds + self.jitter()
+            self.service.status.update(interval_seconds=seconds, next_run=time.time() + delay,
                                        message=f"检查间隔已改为 {seconds // 60} 分钟")
-            self.next_check = time.monotonic() + seconds
+            self.next_check = time.monotonic() + delay
             self.scheduler_wakeup.set()
         finally:
             self.lock.release()
@@ -810,6 +773,44 @@ class TaskController:
                                        message=f"DNS 记录数量已改为 {count} 条")
         finally:
             self.lock.release()
+
+    def set_history_count(self, count):
+        if type(count) is not int or not MIN_HISTORY_COUNT <= count <= MAX_HISTORY_COUNT:
+            raise ServiceError(f"旧记录份数必须在 {MIN_HISTORY_COUNT} 到 {MAX_HISTORY_COUNT} 份之间")
+        if not self.lock.acquire(blocking=False):
+            raise ServiceError("已有任务运行中，请稍后再试")
+        try:
+            history = self.service.status.snapshot().get("dns_history", [])[:count]
+            self.service.status.update(dns_history_count=count, dns_history=history,
+                                       message=f"旧记录保留份数已改为 {count} 份")
+        finally:
+            self.lock.release()
+
+    def jitter(self):
+        return random.randint(self.jitter_min_seconds, self.jitter_max_seconds)
+
+    def set_jitter(self, minimum, maximum):
+        if not valid_jitter(minimum, maximum):
+            raise ServiceError("随机波动区间必须在 1 到 10000 秒之间，下限不能大于上限；关闭时两项均为 0")
+        if not self.lock.acquire(blocking=False):
+            raise ServiceError("已有任务运行中，请稍后再试")
+        try:
+            self.jitter_min_seconds, self.jitter_max_seconds = minimum, maximum
+            interval = self.service.cfg.interval
+            delay = interval + self.jitter()
+            self.service.status.update(jitter_min_seconds=minimum, jitter_max_seconds=maximum,
+                                       next_run=time.time() + delay,
+                                       message=("随机波动已关闭" if maximum == 0 else
+                                                f"随机波动已改为 {minimum} 到 {maximum} 秒"))
+            self.next_check = time.monotonic() + delay
+            self.scheduler_wakeup.set()
+        finally:
+            self.lock.release()
+
+    def next_delay(self, elapsed):
+        interval = self.service.cfg.interval
+        base = interval - elapsed if elapsed < interval else interval
+        return base + self.jitter()
 
     def wait_next(self, delay):
         with self.lock:
@@ -885,7 +886,7 @@ def make_dashboard(status, controller=None):
         def do_POST(self):
             if not self.valid_request(mutation=True):
                 return
-            if self.path not in ("/api/actions", "/api/cfst", "/api/settings"):
+            if self.path not in ("/api/actions", "/api/settings"):
                 self.send_json(404, {"error": "接口不存在"})
                 return
             if self.headers.get("Content-Type", "").split(";", 1)[0] != "application/json":
@@ -906,16 +907,13 @@ def make_dashboard(status, controller=None):
                         raise ValueError()
                 elif self.path == "/api/settings":
                     if (set(data) == {"interval_seconds"} and type(data["interval_seconds"]) is int) or \
-                       (set(data) == {"dns_record_count"} and type(data["dns_record_count"]) is int):
+                       (set(data) == {"dns_record_count"} and type(data["dns_record_count"]) is int) or \
+                       (set(data) == {"dns_history_count"} and type(data["dns_history_count"]) is int) or \
+                       (set(data) == {"jitter_min_seconds", "jitter_max_seconds"} and
+                        type(data["jitter_min_seconds"]) is int and type(data["jitter_max_seconds"]) is int):
                         pass
                     else:
                         raise ValueError()
-                elif not ((data.get("action") == "rollback" and set(data) == {"action"}) or
-                          (data.get("action") == "install" and set(data) == {"action", "version"}
-                           and isinstance(data["version"], str) and re.fullmatch(TAG, data["version"])) or
-                          (data.get("action") == "switch" and set(data) == {"action", "release_id"}
-                           and isinstance(data["release_id"], str) and re.fullmatch(RELEASE_ID, data["release_id"]))):
-                    raise ValueError()
             except (ValueError, TypeError, OSError):
                 self.send_json(400, {"error": "步骤参数无效"})
                 return
@@ -926,10 +924,12 @@ def make_dashboard(status, controller=None):
                 if self.path == "/api/settings":
                     if "interval_seconds" in data:
                         controller.set_interval(data["interval_seconds"])
-                    else:
+                    elif "dns_record_count" in data:
                         controller.set_record_count(data["dns_record_count"])
-                elif self.path == "/api/cfst":
-                    controller.start_cfst(data["action"], data.get("version", data.get("release_id")))
+                    elif "dns_history_count" in data:
+                        controller.set_history_count(data["dns_history_count"])
+                    else:
+                        controller.set_jitter(data["jitter_min_seconds"], data["jitter_max_seconds"])
                 else:
                     controller.start(data["action"])
             except ServiceError as exc:
@@ -942,16 +942,6 @@ def make_dashboard(status, controller=None):
                 return
             if self.path == "/api/status":
                 self.send_json(200, controller.snapshot() if controller else status.snapshot())
-                return
-            elif self.path == "/api/cfst/releases":
-                if controller is None or controller.cfst is None:
-                    self.send_json(503, {"error": "请先配置部署"})
-                    return
-                try:
-                    controller.cfst.catalog.refresh()
-                    self.send_json(200, controller.cfst.catalog.snapshot())
-                except InstallError as error:
-                    self.send_json(502, {"error": str(error)})
                 return
             elif self.path == "/health":
                 body, mime = b'{"ok":true}', "application/json"
@@ -1008,9 +998,10 @@ def main():
         return
     try:
         cfg = Settings.from_env()
+        bundled_release()
         cfg.data_dir.mkdir(parents=True, exist_ok=True)
         lock = acquire_lock(cfg.data_dir / "worker.lock")
-    except (ValueError, ServiceError, OSError) as exc:
+    except (ValueError, ServiceError, InstallError, OSError) as exc:
         LOG.error("启动失败：%s", exc)
         raise SystemExit(2)
     stop = threading.Event()
@@ -1019,7 +1010,7 @@ def main():
     status = Status(cfg.data_dir / "status.json", cfg)
     service = Maintainer(cfg, CloudflareClient(cfg), CFSTRunner(cfg, stop), status, stop, args.dry_run)
     scheduler_wakeup = threading.Event()
-    controller = TaskController(service, CFSTControl(Store(os.environ.get("CFST_HOME", "/opt/cfst"))), scheduler_wakeup)
+    controller = TaskController(service, scheduler_wakeup=scheduler_wakeup)
     server = None
     if not args.once:
         server = ThreadingHTTPServer(("0.0.0.0", args.port), make_dashboard(status, controller))
@@ -1038,7 +1029,7 @@ def main():
                 exit_code = 1 if status.snapshot()["phase"] in ("error", "degraded") else 0
                 break
             elapsed = time.monotonic() - start
-            delay = service.cfg.interval - elapsed if elapsed < service.cfg.interval else service.cfg.interval
+            delay = controller.next_delay(elapsed)
             controller.wait_next(delay)
     finally:
         stop.set()

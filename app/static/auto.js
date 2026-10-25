@@ -2,15 +2,16 @@
 const $ = selector => document.querySelector(selector);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 const date = value => value ? new Date(value * 1000).toLocaleString() : '—';
-const phases = {starting:'准备启动',reading:'读取 DNS',read_done:'读取完成',checking:'检查线路',check_done:'检测完成',selecting:'优选新 IP',select_done:'优选完成',comparing:'综合排序',compare_done:'等待写入',healthy:'全部达标',updating:'写入 DNS',updated:'已完成同步',degraded:'结果不足',error:'任务未完成',stopped:'已停止',unconfigured:'等待部署配置',dry_run:'演练完成',cfst_changing:'切换 CFST',cfst_ready:'CFST 已就绪'};
+const phases = {starting:'准备启动',reading:'读取 DNS',read_done:'读取完成',checking:'检查线路',check_done:'检测完成',selecting:'优选新 IP',select_done:'优选完成',comparing:'综合排序',compare_done:'等待写入',healthy:'全部达标',updating:'写入 DNS',updated:'已完成同步',degraded:'结果不足',error:'任务未完成',stopped:'已停止',unconfigured:'等待部署配置',dry_run:'演练完成'};
 let sending = false;
 let actionError = '';
 let timer;
-let cfstData;
-let cfstMessage = '';
-let cfstOptions = '';
 let intervalMessage = '';
 let recordCountMessage = '';
+let historyCountMessage = '';
+let jitterMessage = '';
+const settingDrafts = new Set();
+let jitterDirty = false;
 const resultExpanded = {selection: false, ranked: false};
 function dnsItems(ips) {
   return ips?.length ? ips.map(ip => `<div class="dns-item">${esc(ip)}</div>`).join('') : '<p class="muted">暂无记录</p>';
@@ -38,30 +39,19 @@ function renderResultRows(selector, rows, ranked, toggleSelector, expanded) {
   }
 }
 let currentStatus = {max_latency_ms:100,min_bandwidth_mbps:30};
-function renderCFST(data) {
-  cfstData = data;
-  const info = data.cfst;
-  const current = info?.installed.find(item => item.id === info.current);
-  $('#cfst-current').textContent = current?.version || data.engine || '未配置';
-  const options = info ? [
-    ...info.installed.map(item => ({value:`installed:${item.id}`, label:`${item.version}${item.current?'（当前）':'（已安装）'}`})),
-    ...info.releases.filter(item => !info.installed.some(local => local.version === item.version)).map(item => ({value:`release:${item.version}`,label:item.version}))
-  ] : [];
-  const key = JSON.stringify(options);
-  const select = $('#cfst-version');
-  if (key !== cfstOptions) {
-    const selected = select.value;
-    select.innerHTML = options.length ? options.map(item => `<option value="${esc(item.value)}">${esc(item.label)}</option>`).join('') : '<option value="">暂无版本</option>';
-    select.value = options.some(item => item.value === selected) ? selected : current ? `installed:${current.id}` : options[0]?.value || '';
-    cfstOptions = key;
-  }
-  const disabled = sending || !info || !data.manual_enabled || data.busy || Boolean(info.error);
-  select.disabled = disabled || !options.length;
-  $('#cfst-refresh').disabled = disabled;
-  $('#cfst-apply').textContent = select.value.startsWith('release:') ? '安装并切换' : '切换版本';
-  $('#cfst-apply').disabled = disabled || !select.value || select.value === `installed:${info?.current}`;
-  $('#cfst-rollback').disabled = disabled || !info?.previous;
-  $('#cfst-status').textContent = !info ? '部署后可管理版本' : info.error || (data.active_action?.startsWith('cfst_') ? data.message : cfstMessage || data.cfst_message || (info.checked_at ? `版本检查：${date(info.checked_at)}` : ''));
+function renderJitter() {
+  const enabled = $('#jitter-enabled').checked;
+  const minimum = Number($('#jitter-min').value);
+  const maximum = Number($('#jitter-max').value);
+  $('#jitter-value').textContent = enabled ? `${minimum}–${maximum} 秒` : '关闭';
+  $('#jitter-range').classList.toggle('off', !enabled);
+  const low = (minimum - 1) / 9999 * 100;
+  const width = (maximum - minimum) / 9999 * 100;
+  $('#jitter-fill').style.left = `calc(${low}% + ${8 - .16 * low}px)`;
+  $('#jitter-fill').style.width = `calc(${width}% - ${.16 * width}px)`;
+  const disabled = sending || currentStatus.busy || !currentStatus.manual_enabled;
+  $('#jitter-enabled').disabled = $('#jitter-save').disabled = disabled;
+  $('#jitter-min').disabled = $('#jitter-max').disabled = disabled || !enabled;
 }
 async function refresh() {
   clearTimeout(timer);
@@ -70,7 +60,6 @@ async function refresh() {
     if (!response.ok) throw new Error('status');
     const data = await response.json();
     currentStatus = data;
-    renderCFST(data);
     $('#connection').classList.remove('offline');
     $('#connection').textContent = data.phase === 'unconfigured' ? '预览' : '已连接';
     $('#domain').textContent = data.domain || '未配置';
@@ -80,13 +69,27 @@ async function refresh() {
     $('#next').textContent = data.next_run ? new Date(data.next_run*1000).toLocaleTimeString() : '—';
     $('#last').textContent = data.last_run ? `上次：${date(data.last_run)}` : `每 ${data.interval_seconds/3600} 小时检查`;
     const intervalInput = $('#interval-minutes');
-    if (document.activeElement !== intervalInput) intervalInput.value = Math.round(data.interval_seconds / 60);
+    if (!settingDrafts.has('#interval-minutes') && document.activeElement !== intervalInput) intervalInput.value = Math.round(data.interval_seconds / 60);
     intervalInput.disabled = $('#interval-save').disabled = sending || data.busy || !data.manual_enabled;
-    $('#interval-status').textContent = intervalMessage || (data.busy ? '任务运行中，稍后可修改' : `当前每 ${Math.round(data.interval_seconds / 60)} 分钟检查一次`);
+    $('#interval-status').textContent = intervalMessage;
     const recordCountInput = $('#dns-record-count');
-    if (document.activeElement !== recordCountInput) recordCountInput.value = data.dns_record_count ?? 3;
+    if (!settingDrafts.has('#dns-record-count') && document.activeElement !== recordCountInput) recordCountInput.value = data.dns_record_count ?? 3;
     recordCountInput.disabled = $('#dns-record-count-save').disabled = sending || data.busy || !data.manual_enabled;
-    $('#dns-record-count-status').textContent = recordCountMessage || (data.dns_record_count ? `当前每次保留 ${data.dns_record_count} 条 DNS 记录` : '首次读取时自动采用现有记录数；无记录默认 3 条');
+    $('#dns-record-count-status').textContent = recordCountMessage;
+    const historyCountInput = $('#dns-history-count');
+    if (!settingDrafts.has('#dns-history-count') && document.activeElement !== historyCountInput) historyCountInput.value = data.dns_history_count ?? 2;
+    historyCountInput.disabled = $('#dns-history-count-save').disabled = sending || data.busy || !data.manual_enabled;
+    $('#dns-history-count-status').textContent = historyCountMessage || '0 表示不保留';
+    if (!jitterDirty) {
+      const jitterMax = Number(data.jitter_max_seconds ?? 0);
+      $('#jitter-enabled').checked = jitterMax > 0;
+      if (jitterMax > 0) {
+        $('#jitter-min').value = data.jitter_min_seconds;
+        $('#jitter-max').value = jitterMax;
+      }
+    }
+    renderJitter();
+    $('#jitter-status').textContent = jitterMessage || '在检查间隔上随机增加时间';
     $('#phase').textContent = phases[data.phase] || data.phase;
     $('#notice').textContent = actionError || (data.phase === 'unconfigured' ? '预览模式，请先配置部署。' : data.message);
     $('#notice').className = actionError || ['error','degraded','unconfigured','stopped'].includes(data.phase) ? 'notice error' : 'notice';
@@ -105,10 +108,12 @@ async function refresh() {
     $('#proposal').textContent = data.proposed_ips?.length ? `待写入：${data.proposed_ips.join('、')}` : '';
     $('#dns').innerHTML = dnsItems(data.dns_ips);
     $('#updated').textContent = data.last_dns_update ? `更新于 ${date(data.last_dns_update)}` : '尚未更新';
-    const history = (data.dns_history || []).slice(0, 2);
+    const historyCount = data.dns_history_count ?? 2;
+    $('#history-count-pill').textContent = historyCount === 0 ? '未保存' : `最近 ${historyCount} 次`;
+    const history = (data.dns_history || []).slice(0, historyCount);
     $('#dns-history').innerHTML = history.length ? history.map((entry, index) =>
-      `<section class="dns-snapshot"><div class="snapshot-title"><strong>${index === 0 ? '上次变更前' : '上上次变更前'}</strong></div><time>变更于 ${esc(date(entry.time))}</time><div class="dns-list">${dnsItems(entry.ips)}</div></section>`
-    ).join('') : '<p class="muted">暂无历史记录</p>';
+      `<section class="dns-snapshot"><div class="snapshot-title"><strong>${index === 0 ? '上次变更前' : `前 ${index + 1} 次变更前`}</strong></div><time>变更于 ${esc(date(entry.time))}</time><div class="dns-list">${dnsItems(entry.ips)}</div></section>`
+    ).join('') : `<p class="muted">${historyCount === 0 ? '已关闭历史记录' : '暂无历史记录'}</p>`;
     renderResultRows('#check-rows', data.check_results, false);
     // Use the DNS snapshot from selection time: writing the winners into DNS
     // must not make those new results disappear from the completed run.
@@ -145,37 +150,12 @@ document.querySelectorAll('[data-action]').forEach(button => button.addEventList
     await refresh();
   }
 }));
-$('#cfst-version').addEventListener('change', () => { if (cfstData) renderCFST(cfstData); });
-async function cfstRequest(action) {
-  if (sending) return;
-  sending = true;
-  cfstMessage = '';
-  disableActions();
-  $('#cfst-status').textContent = action === 'refresh' ? '正在检查官方版本…' : '正在提交…';
-  try {
-    let response;
-    if (action === 'refresh') {
-      response = await fetch('/api/cfst/releases', {cache:'no-store'});
-    } else {
-      const selected = $('#cfst-version').value;
-      const payload = action === 'rollback' ? {action:'rollback'} : selected.startsWith('release:') ?
-        {action:'install',version:selected.slice(8)} : {action:'switch',release_id:selected.slice(10)};
-      response = await fetch('/api/cfst', {method:'POST',headers:{'Content-Type':'application/json','X-Local-Client':'cfst-dashboard'},body:JSON.stringify(payload)});
-    }
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || 'CFST 操作失败');
-    cfstMessage = action === 'refresh' ? '已获取官方版本' : '';
-  } catch (error) { cfstMessage = error.message || 'CFST 操作失败'; }
-  finally { sending = false; await refresh(); }
-}
-$('#cfst-refresh').addEventListener('click', () => cfstRequest('refresh'));
-$('#cfst-apply').addEventListener('click', () => cfstRequest('apply'));
-$('#cfst-rollback').addEventListener('click', () => cfstRequest('rollback'));
 function bindSetting({button, input, status, field, min, max, scale = 1, error, setMessage}) {
+  $(input).addEventListener('input', () => settingDrafts.add(input));
   $(button).addEventListener('click', async () => {
     if (sending) return;
     const value = Number($(input).value);
-    if (!Number.isInteger(value) || value < min || value > max) {
+    if ($(input).value === '' || !Number.isInteger(value) || value < min || value > max) {
       setMessage(error);
       $(status).textContent = error;
       return;
@@ -187,6 +167,7 @@ function bindSetting({button, input, status, field, min, max, scale = 1, error, 
       const response = await fetch('/api/settings', {method:'POST', headers:{'Content-Type':'application/json','X-Local-Client':'cfst-dashboard'}, body:JSON.stringify({[field]:value * scale})});
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || '保存失败');
+      settingDrafts.delete(input);
     } catch (error) {
       setMessage(error.message || '保存失败');
     } finally {
@@ -197,12 +178,54 @@ function bindSetting({button, input, status, field, min, max, scale = 1, error, 
 }
 bindSetting({button:'#interval-save', input:'#interval-minutes', status:'#interval-status', field:'interval_seconds', min:1, max:1440, scale:60, error:'请输入 1 到 1440 分钟', setMessage:message => { intervalMessage = message; }});
 bindSetting({button:'#dns-record-count-save', input:'#dns-record-count', status:'#dns-record-count-status', field:'dns_record_count', min:1, max:10, error:'请输入 1 到 10 条', setMessage:message => { recordCountMessage = message; }});
+bindSetting({button:'#dns-history-count-save', input:'#dns-history-count', status:'#dns-history-count-status', field:'dns_history_count', min:0, max:10, error:'请输入 0 到 10 份', setMessage:message => { historyCountMessage = message; }});
+function adjustJitter(changed) {
+  jitterDirty = true;
+  const minimum = Number($('#jitter-min').value);
+  const maximum = Number($('#jitter-max').value);
+  if (minimum > maximum) {
+    if (changed === 'min') $('#jitter-max').value = minimum;
+    else $('#jitter-min').value = maximum;
+  }
+  renderJitter();
+}
+$('#jitter-enabled').addEventListener('change', () => { jitterDirty = true; renderJitter(); });
+$('#jitter-min').addEventListener('input', () => adjustJitter('min'));
+$('#jitter-max').addEventListener('input', () => adjustJitter('max'));
+$('#jitter-save').addEventListener('click', async () => {
+  if (sending) return;
+  const enabled = $('#jitter-enabled').checked;
+  const minimum = enabled ? Number($('#jitter-min').value) : 0;
+  const maximum = enabled ? Number($('#jitter-max').value) : 0;
+  if (!Number.isInteger(minimum) || !Number.isInteger(maximum) || (enabled && minimum < 1) || maximum > 10000 || minimum > maximum) {
+    jitterMessage = '随机波动区间无效';
+    $('#jitter-status').textContent = jitterMessage;
+    return;
+  }
+  sending = true;
+  jitterMessage = '';
+  disableActions();
+  try {
+    const response = await fetch('/api/settings', {method:'POST', headers:{'Content-Type':'application/json','X-Local-Client':'cfst-dashboard'}, body:JSON.stringify({jitter_min_seconds:minimum,jitter_max_seconds:maximum})});
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || '保存失败');
+    jitterDirty = false;
+  } catch (error) {
+    jitterMessage = error.message || '保存失败';
+  } finally {
+    sending = false;
+    await refresh();
+  }
+});
 for (const key of Object.keys(resultExpanded)) {
   $(`#${key}-toggle`).addEventListener('click', event => {
     resultExpanded[key] = !resultExpanded[key];
     event.currentTarget.textContent = resultExpanded[key] ? '收起' : '展开全部';
     event.currentTarget.setAttribute('aria-expanded', String(resultExpanded[key]));
+    const section = event.currentTarget.closest('.result-section');
+    const returnToTitle = !resultExpanded[key] && section.getBoundingClientRect().top < 0;
     $(`#${key}-rows`).classList.toggle('collapsed', !resultExpanded[key]);
+    if (returnToTitle) section.scrollIntoView({block:'start'});
   });
 }
 refresh();
