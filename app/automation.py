@@ -619,6 +619,8 @@ class Maintainer:
         rows += [{"ip": ip, "speed_mibps": 0, "bandwidth_mbps": 0, "latency_ms": self.cfg.latency_ms + 1,
                   "sent": 0, "received": 0, "loss": 1, "colo": "", "measured": False}
                  for ip in ips if ip not in measured]
+        tested_at = time.time()
+        rows = [{**row, "tested_at": tested_at} for row in rows]
         self.check_rows = rows
         good = sum(qualifies(self.cfg, row) for row in rows)
         managed = [r for r in self.records if r.get("type") == self.cfg.kind]
@@ -626,7 +628,7 @@ class Maintainer:
         healthy = (len(managed) == len(ips) == len(rows) == good == target and
                    {r["ip"] for r in rows} == set(ips) and not any(r.get("proxied") for r in managed))
         self.complete("check", good)
-        self.status.update(results=rows, check_results=rows, check_time=time.time(), phase="healthy" if healthy else "check_done",
+        self.status.update(results=rows, check_results=rows, check_time=tested_at, phase="healthy" if healthy else "check_done",
                            message=f"{target} 个 IP 均达标，保持现有 DNS" if healthy else f"检测完成：{good} / {len(ips)} 个 IP 达标")
         return healthy
 
@@ -708,10 +710,12 @@ class Maintainer:
         LOG.info("CFST 优选来源：%s 行，IPv4 / 具体 IP 候选计数 %s，延迟线程 %s，下载测试上限 %s",
                  len(pool), candidate_count(pool), self.cfg.threads, self.cfg.download_count)
         rows = self.runner.run(pool, self.cfg.download_count)
+        tested_at = time.time()
+        rows = [{**row, "tested_at": tested_at} for row in rows]
         self.selection_rows = rows
-        self.new_top, self.selected_at = rows, time.time()
+        self.new_top, self.selected_at = rows, tested_at
         self.complete("select", len(rows))
-        self.status.update(results=rows, selection_results=rows, selection_time=time.time(),
+        self.status.update(results=rows, selection_results=rows, selection_time=tested_at,
                            selection_existing_ips=self.valid_ips(),
                            selection_candidate_count=candidate_count(pool), phase="select_done",
                            message=f"优选完成：CFST 输出 {len(self.new_top)} 条结果")

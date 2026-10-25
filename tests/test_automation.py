@@ -677,7 +677,7 @@ class ManualSteps(unittest.TestCase):
         def request(payload, path="/api/settings", method="POST", extra=None):
             conn = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=3)
             try:
-                conn.request(method, path, json.dumps(payload), headers={"Content-Type": "application/json",
+                conn.request(method, path, json.dumps(payload) if method == "POST" else None, headers={"Content-Type": "application/json",
                              "X-Local-Client": "cfst-dashboard"} | (extra or {}))
                 response = conn.getresponse()
                 response.read()
@@ -762,6 +762,28 @@ class ManualSteps(unittest.TestCase):
         self.assertEqual(after["dns_ips"], before["dns_ips"])
         self.assertEqual(after["single_results"][IPS[0]]["result"]["latency_ms"], 25)
         self.client.replace.assert_not_called()
+
+    def test_result_timestamps_follow_measurements_through_ranking_and_retests(self):
+        self.run_step("read")
+        self.runner.run.return_value = [row(ip) for ip in IPS]
+        with patch.object(auto.time, "time", return_value=time.time() + 10):
+            self.run_step("check")
+        check_time = self.status.snapshot()["check_time"]
+        self.runner.run.return_value = [row(ip) for ip in NEW]
+        with patch.object(auto.time, "time", return_value=check_time + 10), \
+                patch.object(auto, "candidate_pool", return_value=NEW):
+            self.run_step("select")
+            self.run_step("compare")
+        state = self.status.snapshot()
+        expected = {ip: check_time for ip in IPS} | {ip: check_time + 10 for ip in NEW}
+        self.assertEqual({r["ip"]: r["tested_at"] for r in state["ranked_results"]}, expected)
+        self.assertTrue(all(r["tested_at"] == state["selection_time"] for r in state["selection_results"]))
+        self.runner.run.return_value = [row(IPS[0], speed=10)]
+        with patch.object(auto.time, "time", return_value=check_time + 20):
+            self.controller.start_test_ip(IPS[0])
+            self.controller.worker.join(3)
+        expected[IPS[0]] = check_time + 20
+        self.assertEqual({r["ip"]: r["tested_at"] for r in self.status.snapshot()["ranked_results"]}, expected)
 
     def test_historical_ip_retest_does_not_pollute_current_or_new_ip_results(self):
         self.prepare_final()

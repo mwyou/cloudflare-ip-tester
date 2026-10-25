@@ -25,10 +25,10 @@ function dnsItems(ips) {
   return ips?.length ? ips.map(ip => `<div class="dns-item">${esc(ip)}</div>`).join('') : '<p class="muted">暂无记录</p>';
 }
 function disableActions() { controlsKey = ''; document.querySelectorAll('[data-action],[data-test-ip],.settings-panel button,.settings-panel select,.settings-panel input').forEach(button => { button.disabled = true; }); }
-function renderResultRows(selector, rows, ranked, toggleSelector, expanded) {
+function renderResultRows(selector, rows, source, batchTime, toggleSelector, expanded) {
   const body = $(selector);
   if (!rows?.length) {
-    body.innerHTML = `<tr><td colspan="${ranked ? 5 : 4}" class="empty">暂无结果</td></tr>`;
+    body.innerHTML = `<tr><td colspan="8" class="empty">暂无结果</td></tr>`;
     const toggle = toggleSelector && $(toggleSelector);
     if (toggle) toggle.hidden = true;
     return;
@@ -36,8 +36,14 @@ function renderResultRows(selector, rows, ranked, toggleSelector, expanded) {
   body.innerHTML = rows.map(row => {
     const good = row.latency_ms <= currentStatus.max_latency_ms && row.bandwidth_mbps > currentStatus.min_bandwidth_mbps;
     const singleError = currentStatus.single_results?.[row.ip]?.error;
-    const source = ranked ? `<td>${esc(row.source || '—')}</td>` : '';
-    return `<tr class="${row.selected?'selected':''}">${source}<td class="ip-cell"><div class="ip-line"><span>${esc(row.ip)}</span>${testButton(row.ip)}</div><small>${esc(row.colo || '—')}${row.tested_at?` · 单测 ${esc(date(row.tested_at))}`:''}</small>${singleError?`<small class="bad">${esc(singleError)}</small>`:''}</td><td>${row.measured === false ? '—' : Number(row.latency_ms).toFixed(2)+' ms'}</td><td>${row.measured === false ? '—' : Number(row.bandwidth_mbps).toFixed(2)+' Mbps'}</td><td class="${good?'good':'bad'}">${row.selected?'入选':good?'达标':row.measured===false?'无有效样本':row.speed_mibps>0?'未达标':'无下载样本'}</td></tr>`;
+    const origin = row.source || source || '—';
+    const timestamp = row.tested_at || batchTime || (origin === '当前检测' ? currentStatus.check_time : currentStatus.selection_time);
+    const measuredAt = timestamp ? new Date(timestamp * 1000) : null;
+    const pad = value => String(value).padStart(2, '0');
+    const timeText = measuredAt ? `${measuredAt.getFullYear()}-${pad(measuredAt.getMonth()+1)}-${pad(measuredAt.getDate())} ${pad(measuredAt.getHours())}:${pad(measuredAt.getMinutes())}:${pad(measuredAt.getSeconds())}` : '—';
+    const status = singleError ? '单测失败' : row.selected ? '入选' : good ? '达标' : row.measured === false ? '无有效样本' : row.speed_mibps > 0 ? '未达标' : '无下载样本';
+    const detail = singleError ? `${singleError}；数值与时间保留上次结果` : status;
+    return `<tr class="${row.selected?'selected':''}"><td class="ip-cell"><span title="${esc(row.ip)}">${esc(row.ip)}</span></td><td class="colo-cell">${esc(row.colo || '—')}</td><td>${row.measured === false ? '—' : Number(row.latency_ms).toFixed(2)+' ms'}</td><td>${row.measured === false ? '—' : Number(row.bandwidth_mbps).toFixed(2)+' Mbps'}</td><td class="time-cell"><time ${measuredAt?`datetime="${measuredAt.toISOString()}"`:''}>${esc(timeText)}</time></td><td class="source-cell">${esc(origin)}</td><td class="${!singleError && good?'good':'bad'}" title="${esc(detail)}" aria-label="${esc(detail)}">${status}</td><td class="action-cell">${testButton(row.ip)}</td></tr>`;
   }).join('');
   body.classList.toggle('collapsed', Boolean(toggleSelector) && !expanded && rows.length > 3);
   const toggle = toggleSelector && $(toggleSelector);
@@ -90,21 +96,21 @@ function renderSection(key, data) {
     ).join('') : `<p class="muted">${count === 0 ? '已关闭历史记录' : '暂无历史记录'}</p>`;
   }
   if (key === 'check') {
-    renderResultRows('#check-rows', data.check_results, false);
+    renderResultRows('#check-rows', data.check_results, '当前检测', data.check_time);
     setText('#check-time', data.check_time ? date(data.check_time) : '');
   }
   if (key === 'selection') {
     // Keep the selection-time DNS snapshot even after winners are written.
     const oldIPs = new Set(data.selection_existing_ips ?? []);
     const newRows = (data.selection_results || []).filter(row => !oldIPs.has(row.ip));
-    renderResultRows('#selection-rows', newRows, false, '#selection-toggle', resultExpanded.selection);
+    renderResultRows('#selection-rows', newRows, '新 IP 优选', data.selection_time, '#selection-toggle', resultExpanded.selection);
     setText('#selection-count', data.selection_time ? `候选 ${data.selection_candidate_count ?? 0} 个 · 新 IP ${newRows.length} 条` : '');
     setText('#selection-time', data.selection_time ? date(data.selection_time) : '');
   }
   if (key === 'ranked') {
     $('#proposal').hidden = !data.proposed_ips?.length;
     setText('#proposal', data.proposed_ips?.length ? `待写入：${data.proposed_ips.join('、')}` : '');
-    renderResultRows('#ranked-rows', data.ranked_results, true, '#ranked-toggle', resultExpanded.ranked);
+    renderResultRows('#ranked-rows', data.ranked_results, '', null, '#ranked-toggle', resultExpanded.ranked);
     setText('#ranked-time', data.ranked_time ? date(data.ranked_time) : '');
   }
   if (key === 'events') {

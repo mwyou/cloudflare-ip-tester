@@ -39,20 +39,22 @@ button:disabled,input:disabled,select:disabled{cursor:default;color:#7c8592;back
 input,select{padding:7px 10px;max-width:100%;min-width:0}
 .settings-panel,.actions-panel{margin-bottom:20px}
 .settings-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:16px;align-items:stretch}
-.setting{min-width:0;padding:16px;border:1px solid var(--line);border-radius:7px;background:#fafbfc}
+.setting{display:grid;grid-template-rows:22px 66px 20px;gap:6px;justify-items:center;align-items:center;text-align:center;min-width:0;padding:16px;border:1px solid var(--line);border-radius:7px;background:#fafbfc}
 .settings-save{display:flex;align-items:center;gap:16px}
 .settings-save .hint{margin:0}
 #settings-save{background:var(--orange);border-color:var(--orange);color:#202632;font-weight:600;white-space:nowrap}
 #settings-save:hover:enabled{background:#ff952e}
 #settings-save:disabled{background:#f6f7f9;border-color:var(--line);color:#7c8592}
 .setting>label,.setting-title label{display:block;font-weight:500;font-size:13px}
-.setting-controls{display:flex;align-items:center;gap:8px;margin-top:10px}
+.setting-controls{display:flex;align-items:center;justify-content:center;gap:8px}
+.setting .hint{margin:0}
+.setting input[type="number"]{text-align:center}
 .setting-controls input{width:80px}
 .setting-controls>span{font-size:12px;color:var(--muted)}
-.setting-title{font-weight:500;font-size:13px;justify-content:space-between}
+.setting-title{font-weight:500;font-size:13px;justify-content:center;gap:12px}
 .setting-title .jitter-switch{display:flex;gap:6px;align-items:center;font-size:12px;color:var(--muted)}
 .jitter-switch input{min-height:0;margin:0;width:14px;height:14px;accent-color:var(--orange)}
-.jitter-controls{display:flex;gap:12px;align-items:center;margin-top:4px}
+.jitter-controls{display:flex;align-items:center;width:100%;max-width:240px}
 .jitter-range{flex:1;min-width:0}
 .jitter-range output{font-size:12px;color:var(--accent);font-variant-numeric:tabular-nums}
 .range-pair{position:relative;height:22px}
@@ -88,12 +90,17 @@ input,select{padding:7px 10px;max-width:100%;min-width:0}
 .result-title{gap:8px;margin-bottom:12px;position:sticky;top:0;z-index:3;background:var(--panel);padding:10px 0;border-bottom:1px solid var(--line)}
 .result-title time{font-size:11px;color:var(--muted);margin-left:auto;font-variant-numeric:tabular-nums}
 .result-hint{margin:0 0 10px}
-.table-wrap{overflow:visible}
-table{width:100%;border-collapse:collapse;text-align:left;table-layout:fixed;overflow-wrap:anywhere}
-th{font-size:11px;color:var(--muted);font-weight:500;padding:9px 10px;background:#f6f7f9;border-bottom:1px solid var(--line)}
-td{padding:12px 10px;border-bottom:1px solid #edf0f3;font-size:12px;font-variant-numeric:tabular-nums;vertical-align:middle}
+.table-wrap{overflow-x:auto}
+table{width:100%;min-width:820px;border-collapse:collapse;text-align:center;table-layout:fixed}
+.col-ip{width:17%}.col-colo{width:6%}.col-latency{width:12%}.col-speed{width:13%}.col-time{width:20%}.col-source{width:11%}.col-status{width:12%}.col-action{width:9%}
+th,td{white-space:nowrap}
+.ip-cell>span{display:block;overflow:hidden;text-overflow:ellipsis}
+.time-cell{font-size:11px;color:var(--muted)}
+.colo-cell,.source-cell{font-size:11px}
+.action-cell .ip-test{min-width:52px}
+th{font-size:11px;color:var(--muted);font-weight:500;padding:9px 8px;background:#f6f7f9;border-bottom:1px solid var(--line)}
+td{height:46px;padding:9px 8px;border-bottom:1px solid #edf0f3;font-size:12px;font-variant-numeric:tabular-nums;vertical-align:middle}
 td.ip-cell{font-family:Consolas,monospace;font-size:13px}
-td small{display:block;color:var(--muted);font:10px/1.6 "Segoe UI",sans-serif;margin-top:2px}
 tr.selected{background:#fff7ef}
 .good{color:var(--good)}
 .bad{color:var(--bad)}
@@ -106,15 +113,14 @@ tbody.collapsed tr:nth-child(n+4){display:none}
 .history li{padding:9px 0;border-top:1px solid var(--line);display:flex;gap:20px;font-size:12px;overflow-wrap:anywhere}
 .history time{color:var(--muted);min-width:150px}
 @media(max-width:1190px){.settings-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
-@media(max-width:1100px){.metrics{grid-template-columns:1fr 1fr}.main-grid{grid-template-columns:250px minmax(0,1fr)}.steps{gap:8px}.step-number{display:none}}
+@media(max-width:1220px){.main-grid{grid-template-columns:1fr}.dns-list{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media(max-width:1100px){.metrics{grid-template-columns:1fr 1fr}.steps{gap:8px}.step-number{display:none}}
 @media(max-width:800px){.settings-grid{grid-template-columns:1fr 1fr}.main-grid{grid-template-columns:1fr}.dns-list{grid-template-columns:repeat(3,minmax(0,1fr))}.steps{grid-template-columns:repeat(3,minmax(0,1fr))}}
 @media(max-width:540px){.workspace{padding:0 12px 24px}header{padding:16px 0}header h1{font-size:16px}.brand{gap:8px}.brand-mark{width:30px;height:30px}.connection{font-size:11px}.panel{padding:16px}.metrics{gap:10px}.metrics article{padding:14px}.metrics strong{font-size:18px}.settings-grid{grid-template-columns:1fr;gap:18px}.steps{grid-template-columns:1fr 1fr}.dns-list{grid-template-columns:1fr}.result-title time{margin-left:0;font-size:10px}.result-title h3{flex:1}.result-title .pill{order:3;width:100%}.result-title .result-toggle{margin-left:auto}th,td{padding:9px 5px;font-size:11px}td.ip-cell{font-size:11px}.history{padding:0 16px}.history li{display:block}.history time{display:block}.panel-title{gap:6px}}
 
-.threshold-controls{display:grid;grid-template-columns:1fr;gap:6px 8px;margin-top:9px;align-items:center}
-.threshold-controls label{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted)}
+.threshold-controls{display:grid;grid-template-columns:1fr;gap:6px;align-items:center}
+.threshold-controls label{display:grid;grid-template-columns:37px 70px 30px;align-items:center;gap:6px;font-size:11px;color:var(--muted);text-align:left}
 .threshold-controls label>span:first-child{width:37px;flex-shrink:0}
 .threshold-controls input{width:70px;min-height:30px;padding:3px 6px}
-.ip-line{display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap}
-.ip-line>span{overflow-wrap:anywhere;min-width:0}
 .ip-test{min-height:26px;padding:2px 7px;font:11px/1.6 "Microsoft YaHei",sans-serif;color:var(--accent);flex-shrink:0}
 .ip-test.running{background:var(--soft);border-color:var(--orange)}
